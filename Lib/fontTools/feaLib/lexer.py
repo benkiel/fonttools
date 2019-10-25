@@ -1,5 +1,3 @@
-from __future__ import print_function, division, absolute_import
-from __future__ import unicode_literals
 from fontTools.misc.py23 import *
 from fontTools.feaLib.error import FeatureLibError, IncludedFeaNotFound
 import re
@@ -8,6 +6,9 @@ import os
 
 class Lexer(object):
     NUMBER = "NUMBER"
+    HEXADECIMAL = "HEXADECIMAL"
+    OCTAL = "OCTAL"
+    NUMBERS = (NUMBER, HEXADECIMAL, OCTAL)
     FLOAT = "FLOAT"
     STRING = "STRING"
     NAME = "NAME"
@@ -28,7 +29,7 @@ class Lexer(object):
     CHAR_NAME_START_ = CHAR_LETTER_ + "_+*:.^~!\\"
     CHAR_NAME_CONTINUATION_ = CHAR_LETTER_ + CHAR_DIGIT_ + "_.+*:^~!/-"
 
-    RE_GLYPHCLASS = re.compile(r"^[A-Za-z_0-9.]+$")
+    RE_GLYPHCLASS = re.compile(r"^[A-Za-z_0-9.\-]+$")
 
     MODE_NORMAL_ = "NORMAL"
     MODE_FILENAME_ = "FILENAME"
@@ -113,7 +114,7 @@ class Lexer(object):
             if not Lexer.RE_GLYPHCLASS.match(glyphclass):
                 raise FeatureLibError(
                     "Glyph class names must consist of letters, digits, "
-                    "underscore, or period", location)
+                    "underscore, period or hyphen", location)
             return (Lexer.GLYPHCLASS, glyphclass, location)
         if cur_char in Lexer.CHAR_NAME_START_:
             self.pos_ += 1
@@ -125,7 +126,10 @@ class Lexer(object):
         if cur_char == "0" and next_char in "xX":
             self.pos_ += 2
             self.scan_over_(Lexer.CHAR_HEXDIGIT_)
-            return (Lexer.NUMBER, int(text[start:self.pos_], 16), location)
+            return (Lexer.HEXADECIMAL, int(text[start:self.pos_], 16), location)
+        if cur_char == "0" and next_char in Lexer.CHAR_DIGIT_:
+            self.scan_over_(Lexer.CHAR_DIGIT_)
+            return (Lexer.OCTAL, int(text[start:self.pos_], 8), location)
         if cur_char in Lexer.CHAR_DIGIT_:
             self.scan_over_(Lexer.CHAR_DIGIT_)
             if self.pos_ >= limit or text[self.pos_] != ".":

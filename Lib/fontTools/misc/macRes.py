@@ -1,13 +1,9 @@
 """ Tools for reading Mac resource forks. """
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 import struct
 from fontTools.misc import sstruct
 from collections import OrderedDict
-try:
-	from collections.abc import MutableMapping
-except ImportError:
-	from UserDict import DictMixin as MutableMapping
+from collections.abc import MutableMapping
 
 
 class ResourceError(Exception):
@@ -33,6 +29,8 @@ class ResourceReader(MutableMapping):
 
 	@staticmethod
 	def openResourceFork(path):
+		if hasattr(path, "__fspath__"):  # support os.PathLike objects
+			path = path.__fspath__()
 		with open(path + '/..namedfork/rsrc', 'rb') as resfork:
 			data = resfork.read()
 		infile = BytesIO(data)

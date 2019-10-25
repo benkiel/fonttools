@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-from __future__ import print_function, division, absolute_import
-from __future__ import unicode_literals
 from fontTools.feaLib.error import FeatureLibError
 from fontTools.feaLib.parser import Parser, SymbolTable
 from fontTools.misc.py23 import *
@@ -215,6 +213,8 @@ class ParserTest(unittest.TestCase):
         [liga] = self.parse("feature liga useExtension {} liga;").statements
         self.assertEqual(liga.name, "liga")
         self.assertTrue(liga.use_extension)
+        self.assertEqual(liga.asFea(),
+                         "feature liga useExtension {\n    \n} liga;\n")
 
     def test_feature_comment(self):
         [liga] = self.parse("feature liga { # Comment\n } liga;").statements
@@ -406,7 +406,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(smcp.statements[0].glyphSet(), ("a", "b", "s"))
 
     def test_glyphclass_scoping_bug496(self):
-        # https://github.com/behdad/fonttools/issues/496
+        # https://github.com/fonttools/fonttools/issues/496
         f1, f2 = self.parse(
             "feature F1 { lookup L { @GLYPHCLASS = [A B C];} L; } F1;"
             "feature F2 { sub @GLYPHCLASS by D; } F2;"
@@ -608,6 +608,8 @@ class ParserTest(unittest.TestCase):
         [lookup] = self.parse("lookup Foo useExtension {} Foo;").statements
         self.assertEqual(lookup.name, "Foo")
         self.assertTrue(lookup.use_extension)
+        self.assertEqual(lookup.asFea(),
+                         "lookup Foo useExtension {\n    \n} Foo;\n")
 
     def test_lookup_block_name_mismatch(self):
         self.assertRaisesRegex(
@@ -673,6 +675,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(flag.value, 9)
         self.assertIsNone(flag.markAttachment)
         self.assertIsNone(flag.markFilteringSet)
+        self.assertEqual(flag.asFea(), "lookupflag RightToLeft IgnoreMarks;")
 
     def test_lookupflag_format_A_MarkAttachmentType(self):
         flag = self.parse_lookupflag_(
@@ -684,6 +687,8 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(flag.markAttachment.glyphSet(),
                          ("acute", "grave", "macron"))
         self.assertIsNone(flag.markFilteringSet)
+        self.assertEqual(flag.asFea(),
+            "lookupflag RightToLeft MarkAttachmentType @TOP_MARKS;")
 
     def test_lookupflag_format_A_UseMarkFilteringSet(self):
         flag = self.parse_lookupflag_(
@@ -695,6 +700,8 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(flag.markFilteringSet, ast.GlyphClassName)
         self.assertEqual(flag.markFilteringSet.glyphSet(),
                          ("cedilla", "ogonek"))
+        self.assertEqual(flag.asFea(),
+            "lookupflag IgnoreLigatures UseMarkFilteringSet @BOTTOM_MARKS;")
 
     def test_lookupflag_format_B(self):
         flag = self.parse_lookupflag_("lookupflag 7;")
@@ -702,6 +709,23 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(flag.value, 7)
         self.assertIsNone(flag.markAttachment)
         self.assertIsNone(flag.markFilteringSet)
+        self.assertEqual(flag.asFea(),
+            "lookupflag RightToLeft IgnoreBaseGlyphs IgnoreLigatures;")
+
+    def test_lookupflag_format_B_zero(self):
+        flag = self.parse_lookupflag_("lookupflag 0;")
+        self.assertIsInstance(flag, ast.LookupFlagStatement)
+        self.assertEqual(flag.value, 0)
+        self.assertIsNone(flag.markAttachment)
+        self.assertIsNone(flag.markFilteringSet)
+        self.assertEqual(flag.asFea(), "lookupflag 0;")
+
+    def test_lookupflag_no_value(self):
+        self.assertRaisesRegex(
+            FeatureLibError,
+            'lookupflag must have a value',
+            self.parse,
+            "feature test {lookupflag;} test;")
 
     def test_lookupflag_repeated(self):
         self.assertRaisesRegex(
@@ -722,7 +746,7 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(pos, ast.SinglePosStatement)
         [(glyphs, value)] = pos.pos
         self.assertEqual(glyphstr([glyphs]), "one")
-        self.assertEqual(value.makeString(vertical=False), "<1 2 3 4>")
+        self.assertEqual(value.asFea(), "<1 2 3 4>")
 
     def test_gpos_type_1_glyphclass_horizontal(self):
         doc = self.parse("feature kern {pos [one two] -300;} kern;")
@@ -730,7 +754,7 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(pos, ast.SinglePosStatement)
         [(glyphs, value)] = pos.pos
         self.assertEqual(glyphstr([glyphs]), "[one two]")
-        self.assertEqual(value.makeString(vertical=False), "-300")
+        self.assertEqual(value.asFea(), "-300")
 
     def test_gpos_type_1_glyphclass_vertical(self):
         doc = self.parse("feature vkrn {pos [one two] -300;} vkrn;")
@@ -738,7 +762,7 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(pos, ast.SinglePosStatement)
         [(glyphs, value)] = pos.pos
         self.assertEqual(glyphstr([glyphs]), "[one two]")
-        self.assertEqual(value.makeString(vertical=True), "-300")
+        self.assertEqual(value.asFea(), "-300")
 
     def test_gpos_type_1_multiple(self):
         doc = self.parse("feature f {pos one'1 two'2 [five six]'56;} f;")
@@ -746,11 +770,11 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(pos, ast.SinglePosStatement)
         [(glyphs1, val1), (glyphs2, val2), (glyphs3, val3)] = pos.pos
         self.assertEqual(glyphstr([glyphs1]), "one")
-        self.assertEqual(val1.makeString(vertical=False), "1")
+        self.assertEqual(val1.asFea(), "1")
         self.assertEqual(glyphstr([glyphs2]), "two")
-        self.assertEqual(val2.makeString(vertical=False), "2")
+        self.assertEqual(val2.asFea(), "2")
         self.assertEqual(glyphstr([glyphs3]), "[five six]")
-        self.assertEqual(val3.makeString(vertical=False), "56")
+        self.assertEqual(val3.asFea(), "56")
         self.assertEqual(pos.prefix, [])
         self.assertEqual(pos.suffix, [])
 
@@ -770,7 +794,27 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(pos, ast.SinglePosStatement)
         [(glyphs, value)] = pos.pos
         self.assertEqual(glyphstr([glyphs]), "[T Y]")
-        self.assertEqual(value.makeString(vertical=False), "20")
+        self.assertEqual(value.asFea(), "20")
+        self.assertEqual(glyphstr(pos.prefix), "[A B]")
+        self.assertEqual(glyphstr(pos.suffix), "comma")
+
+    def test_gpos_type_1_chained_special_kern_format_valuerecord_format_a(self):
+        doc = self.parse("feature kern {pos [A B] [T Y]' comma 20;} kern;")
+        pos = doc.statements[0].statements[0]
+        self.assertIsInstance(pos, ast.SinglePosStatement)
+        [(glyphs, value)] = pos.pos
+        self.assertEqual(glyphstr([glyphs]), "[T Y]")
+        self.assertEqual(value.asFea(), "20")
+        self.assertEqual(glyphstr(pos.prefix), "[A B]")
+        self.assertEqual(glyphstr(pos.suffix), "comma")
+
+    def test_gpos_type_1_chained_special_kern_format_valuerecord_format_b(self):
+        doc = self.parse("feature kern {pos [A B] [T Y]' comma <0 0 0 0>;} kern;")
+        pos = doc.statements[0].statements[0]
+        self.assertIsInstance(pos, ast.SinglePosStatement)
+        [(glyphs, value)] = pos.pos
+        self.assertEqual(glyphstr([glyphs]), "[T Y]")
+        self.assertEqual(value.asFea(), "<0 0 0 0>")
         self.assertEqual(glyphstr(pos.prefix), "[A B]")
         self.assertEqual(glyphstr(pos.suffix), "comma")
 
@@ -782,10 +826,9 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(type(pos), ast.PairPosStatement)
         self.assertFalse(pos.enumerated)
         self.assertEqual(glyphstr([pos.glyphs1]), "[T V]")
-        self.assertEqual(pos.valuerecord1.makeString(vertical=False), "-60")
+        self.assertEqual(pos.valuerecord1.asFea(), "-60")
         self.assertEqual(glyphstr([pos.glyphs2]), "[a b c]")
-        self.assertEqual(pos.valuerecord2.makeString(vertical=False),
-                         "<1 2 3 4>")
+        self.assertEqual(pos.valuerecord2.asFea(), "<1 2 3 4>")
 
     def test_gpos_type_2_format_a_enumerated(self):
         doc = self.parse("feature kern {"
@@ -795,12 +838,25 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(type(pos), ast.PairPosStatement)
         self.assertTrue(pos.enumerated)
         self.assertEqual(glyphstr([pos.glyphs1]), "[T V]")
-        self.assertEqual(pos.valuerecord1.makeString(vertical=False), "-60")
+        self.assertEqual(pos.valuerecord1.asFea(), "-60")
         self.assertEqual(glyphstr([pos.glyphs2]), "[a b c]")
-        self.assertEqual(pos.valuerecord2.makeString(vertical=False),
-                         "<1 2 3 4>")
+        self.assertEqual(pos.valuerecord2.asFea(), "<1 2 3 4>")
 
-    def test_gpos_type_2_format_a_with_null(self):
+    def test_gpos_type_2_format_a_with_null_first(self):
+        doc = self.parse("feature kern {"
+                         "    pos [T V] <NULL> [a b c] <1 2 3 4>;"
+                         "} kern;")
+        pos = doc.statements[0].statements[0]
+        self.assertEqual(type(pos), ast.PairPosStatement)
+        self.assertFalse(pos.enumerated)
+        self.assertEqual(glyphstr([pos.glyphs1]), "[T V]")
+        self.assertFalse(pos.valuerecord1)
+        self.assertEqual(pos.valuerecord1.asFea(), "<NULL>")
+        self.assertEqual(glyphstr([pos.glyphs2]), "[a b c]")
+        self.assertEqual(pos.valuerecord2.asFea(), "<1 2 3 4>")
+        self.assertEqual(pos.asFea(), "pos [T V] <NULL> [a b c] <1 2 3 4>;")
+
+    def test_gpos_type_2_format_a_with_null_second(self):
         doc = self.parse("feature kern {"
                          "    pos [T V] <1 2 3 4> [a b c] <NULL>;"
                          "} kern;")
@@ -808,10 +864,10 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(type(pos), ast.PairPosStatement)
         self.assertFalse(pos.enumerated)
         self.assertEqual(glyphstr([pos.glyphs1]), "[T V]")
-        self.assertEqual(pos.valuerecord1.makeString(vertical=False),
-                         "<1 2 3 4>")
+        self.assertEqual(pos.valuerecord1.asFea(), "<1 2 3 4>")
         self.assertEqual(glyphstr([pos.glyphs2]), "[a b c]")
-        self.assertIsNone(pos.valuerecord2)
+        self.assertFalse(pos.valuerecord2)
+        self.assertEqual(pos.asFea(), "pos [T V] [a b c] <1 2 3 4>;")
 
     def test_gpos_type_2_format_b(self):
         doc = self.parse("feature kern {"
@@ -821,8 +877,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(type(pos), ast.PairPosStatement)
         self.assertFalse(pos.enumerated)
         self.assertEqual(glyphstr([pos.glyphs1]), "[T V]")
-        self.assertEqual(pos.valuerecord1.makeString(vertical=False),
-                         "<1 2 3 4>")
+        self.assertEqual(pos.valuerecord1.asFea(), "<1 2 3 4>")
         self.assertEqual(glyphstr([pos.glyphs2]), "[a b c]")
         self.assertIsNone(pos.valuerecord2)
 
@@ -834,8 +889,7 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(type(pos), ast.PairPosStatement)
         self.assertTrue(pos.enumerated)
         self.assertEqual(glyphstr([pos.glyphs1]), "[T V]")
-        self.assertEqual(pos.valuerecord1.makeString(vertical=False),
-                         "<1 2 3 4>")
+        self.assertEqual(pos.valuerecord1.asFea(), "<1 2 3 4>")
         self.assertEqual(glyphstr([pos.glyphs2]), "[a b c]")
         self.assertIsNone(pos.valuerecord2)
 
@@ -1063,6 +1117,36 @@ class ParserTest(unittest.TestCase):
             FeatureLibError, "Expected platform id 1 or 3",
             self.parse, 'table name { nameid 9 666 "Foo"; } name;')
 
+    def test_nameid_hexadecimal(self):
+        doc = self.parse(
+            r'table name { nameid 0x9 0x3 0x1 0x0409 "Test"; } name;')
+        name = doc.statements[0].statements[0]
+        self.assertEqual(name.nameID, 9)
+        self.assertEqual(name.platformID, 3)
+        self.assertEqual(name.platEncID, 1)
+        self.assertEqual(name.langID, 0x0409)
+
+    def test_nameid_octal(self):
+        doc = self.parse(
+            r'table name { nameid 011 03 012 02011 "Test"; } name;')
+        name = doc.statements[0].statements[0]
+        self.assertEqual(name.nameID, 9)
+        self.assertEqual(name.platformID, 3)
+        self.assertEqual(name.platEncID, 10)
+        self.assertEqual(name.langID, 0o2011)
+
+    def test_cv_hexadecimal(self):
+        doc = self.parse(
+            r'feature cv01 { cvParameters { Character 0x5DDE; }; } cv01;')
+        cv = doc.statements[0].statements[0].statements[0]
+        self.assertEqual(cv.character, 0x5DDE)
+
+    def test_cv_octal(self):
+        doc = self.parse(
+            r'feature cv01 { cvParameters { Character 056736; }; } cv01;')
+        cv = doc.statements[0].statements[0].statements[0]
+        self.assertEqual(cv.character, 0o56736)
+
     def test_rsub_format_a(self):
         doc = self.parse("feature test {rsub a [b B] c' d [e E] by C;} test;")
         rsub = doc.statements[0].statements[0]
@@ -1129,7 +1213,7 @@ class ParserTest(unittest.TestCase):
         self.assertRaisesRegex(
             FeatureLibError,
             'In reverse chaining single substitutions, the replacement '
-            '\(after "by"\) must be a single glyph or glyph class',
+            r'\(after "by"\) must be a single glyph or glyph class',
             self.parse, "feature test {rsub f_i by f i;} test;")
 
     def test_script(self):
@@ -1254,6 +1338,14 @@ class ParserTest(unittest.TestCase):
         self.assertIsInstance(sub, ast.MultipleSubstStatement)
         self.assertEqual(sub.glyph, "f_f_i")
         self.assertEqual(sub.replacement, ("f", "f", "i"))
+
+    def test_substitute_multiple_force_chained(self):
+        doc = self.parse("lookup L {sub f_f_i' by f f i;} L;")
+        sub = doc.statements[0].statements[0]
+        self.assertIsInstance(sub, ast.MultipleSubstStatement)
+        self.assertEqual(sub.glyph, "f_f_i")
+        self.assertEqual(sub.replacement, ("f", "f", "i"))
+        self.assertEqual(sub.asFea(), "sub f_f_i' by f f i;")
 
     def test_substitute_multiple_by_mutliple(self):
         self.assertRaisesRegex(
@@ -1411,7 +1503,8 @@ class ParserTest(unittest.TestCase):
 
     def test_valuerecord_format_a_horizontal(self):
         doc = self.parse("feature liga {valueRecordDef 123 foo;} liga;")
-        value = doc.statements[0].statements[0].value
+        valuedef = doc.statements[0].statements[0]
+        value = valuedef.value
         self.assertIsNone(value.xPlacement)
         self.assertIsNone(value.yPlacement)
         self.assertEqual(value.xAdvance, 123)
@@ -1420,11 +1513,13 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(value.yPlaDevice)
         self.assertIsNone(value.xAdvDevice)
         self.assertIsNone(value.yAdvDevice)
-        self.assertEqual(value.makeString(vertical=False), "123")
+        self.assertEqual(valuedef.asFea(), "valueRecordDef 123 foo;")
+        self.assertEqual(value.asFea(), "123")
 
     def test_valuerecord_format_a_vertical(self):
         doc = self.parse("feature vkrn {valueRecordDef 123 foo;} vkrn;")
-        value = doc.statements[0].statements[0].value
+        valuedef = doc.statements[0].statements[0]
+        value = valuedef.value
         self.assertIsNone(value.xPlacement)
         self.assertIsNone(value.yPlacement)
         self.assertIsNone(value.xAdvance)
@@ -1433,11 +1528,13 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(value.yPlaDevice)
         self.assertIsNone(value.xAdvDevice)
         self.assertIsNone(value.yAdvDevice)
-        self.assertEqual(value.makeString(vertical=True), "123")
+        self.assertEqual(valuedef.asFea(), "valueRecordDef 123 foo;")
+        self.assertEqual(value.asFea(), "123")
 
     def test_valuerecord_format_a_zero_horizontal(self):
         doc = self.parse("feature liga {valueRecordDef 0 foo;} liga;")
-        value = doc.statements[0].statements[0].value
+        valuedef = doc.statements[0].statements[0]
+        value = valuedef.value
         self.assertIsNone(value.xPlacement)
         self.assertIsNone(value.yPlacement)
         self.assertEqual(value.xAdvance, 0)
@@ -1446,11 +1543,13 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(value.yPlaDevice)
         self.assertIsNone(value.xAdvDevice)
         self.assertIsNone(value.yAdvDevice)
-        self.assertEqual(value.makeString(vertical=False), "0")
+        self.assertEqual(valuedef.asFea(), "valueRecordDef 0 foo;")
+        self.assertEqual(value.asFea(), "0")
 
     def test_valuerecord_format_a_zero_vertical(self):
         doc = self.parse("feature vkrn {valueRecordDef 0 foo;} vkrn;")
-        value = doc.statements[0].statements[0].value
+        valuedef = doc.statements[0].statements[0]
+        value = valuedef.value
         self.assertIsNone(value.xPlacement)
         self.assertIsNone(value.yPlacement)
         self.assertIsNone(value.xAdvance)
@@ -1459,7 +1558,8 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(value.yPlaDevice)
         self.assertIsNone(value.xAdvDevice)
         self.assertIsNone(value.yAdvDevice)
-        self.assertEqual(value.makeString(vertical=True), "0")
+        self.assertEqual(valuedef.asFea(), "valueRecordDef 0 foo;")
+        self.assertEqual(value.asFea(), "0")
 
     def test_valuerecord_format_a_vertical_contexts_(self):
         for tag in "vkrn vpal vhal valt".split():
@@ -1472,7 +1572,8 @@ class ParserTest(unittest.TestCase):
 
     def test_valuerecord_format_b(self):
         doc = self.parse("feature liga {valueRecordDef <1 2 3 4> foo;} liga;")
-        value = doc.statements[0].statements[0].value
+        valuedef = doc.statements[0].statements[0]
+        value = valuedef.value
         self.assertEqual(value.xPlacement, 1)
         self.assertEqual(value.yPlacement, 2)
         self.assertEqual(value.xAdvance, 3)
@@ -1481,11 +1582,13 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(value.yPlaDevice)
         self.assertIsNone(value.xAdvDevice)
         self.assertIsNone(value.yAdvDevice)
-        self.assertEqual(value.makeString(vertical=False), "<1 2 3 4>")
+        self.assertEqual(valuedef.asFea(), "valueRecordDef <1 2 3 4> foo;")
+        self.assertEqual(value.asFea(), "<1 2 3 4>")
 
     def test_valuerecord_format_b_zero(self):
         doc = self.parse("feature liga {valueRecordDef <0 0 0 0> foo;} liga;")
-        value = doc.statements[0].statements[0].value
+        valuedef = doc.statements[0].statements[0]
+        value = valuedef.value
         self.assertEqual(value.xPlacement, 0)
         self.assertEqual(value.yPlacement, 0)
         self.assertEqual(value.xAdvance, 0)
@@ -1494,7 +1597,8 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(value.yPlaDevice)
         self.assertIsNone(value.xAdvDevice)
         self.assertIsNone(value.yAdvDevice)
-        self.assertEqual(value.makeString(vertical=False), "<0 0 0 0>")
+        self.assertEqual(valuedef.asFea(), "valueRecordDef <0 0 0 0> foo;")
+        self.assertEqual(value.asFea(), "<0 0 0 0>")
 
     def test_valuerecord_format_c(self):
         doc = self.parse(
@@ -1516,14 +1620,15 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(value.yPlaDevice, ((11, 111), (12, 112)))
         self.assertIsNone(value.xAdvDevice)
         self.assertEqual(value.yAdvDevice, ((33, -113), (44, -114), (55, 115)))
-        self.assertEqual(value.makeString(vertical=False),
+        self.assertEqual(value.asFea(),
                          "<1 2 3 4 <device 8 88> <device 11 111, 12 112>"
                          " <device NULL> <device 33 -113, 44 -114, 55 115>>")
 
     def test_valuerecord_format_d(self):
         doc = self.parse("feature test {valueRecordDef <NULL> foo;} test;")
         value = doc.statements[0].statements[0].value
-        self.assertIsNone(value)
+        self.assertFalse(value)
+        self.assertEqual(value.asFea(), "<NULL>")
 
     def test_valuerecord_named(self):
         doc = self.parse("valueRecordDef <1 2 3 4> foo;"
@@ -1560,10 +1665,9 @@ class ParserTest(unittest.TestCase):
         [langsys] = self.parse("languagesystem latn DEU;").statements
         self.assertEqual(langsys.script, "latn")
         self.assertEqual(langsys.language, "DEU ")
-        self.assertRaisesRegex(
-            FeatureLibError,
-            'For script "DFLT", the language must be "dflt"',
-            self.parse, "languagesystem DFLT DEU;")
+        [langsys] = self.parse("languagesystem DFLT DEU;").statements
+        self.assertEqual(langsys.script, "DFLT")
+        self.assertEqual(langsys.language, "DEU ")
         self.assertRaisesRegex(
             FeatureLibError,
             '"dflt" is not a valid script tag; use "DFLT" instead',

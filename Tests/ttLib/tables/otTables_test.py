@@ -1,5 +1,4 @@
 # coding: utf-8
-from __future__ import print_function, division, absolute_import, unicode_literals
 from fontTools.misc.py23 import *
 from fontTools.misc.testTools import getXML, parseXML, FakeFont
 from fontTools.misc.textTools import deHexStr, hexStr
@@ -166,7 +165,7 @@ class MultipleSubstTest(unittest.TestCase):
                          {'c_t': ['c', 't'], 'f_f_i': ['f', 'f', 'i']})
 
     def test_fromXML_oldFormat_bug385(self):
-        # https://github.com/behdad/fonttools/issues/385
+        # https://github.com/fonttools/fonttools/issues/385
         table = otTables.MultipleSubst()
         table.Format = 1
         for name, attrs, content in parseXML(
@@ -383,6 +382,10 @@ class RearrangementMorphActionTest(unittest.TestCase):
         r.compile(writer, self.font, actionIndex=None)
         self.assertEqual(hexStr(writer.getAllData()), "1234fffd")
 
+    def testCompileActions(self):
+        act = otTables.RearrangementMorphAction()
+        self.assertEqual(act.compileActions(self.font, []), (None, None))
+
     def testDecompileToXML(self):
         r = otTables.RearrangementMorphAction()
         r.decompile(OTTableReader(deHexStr("1234fffd")),
@@ -410,6 +413,10 @@ class ContextualMorphActionTest(unittest.TestCase):
         writer = OTTableWriter()
         a.compile(writer, self.font, actionIndex=None)
         self.assertEqual(hexStr(writer.getAllData()), "1234f117deadbeef")
+
+    def testCompileActions(self):
+        act = otTables.ContextualMorphAction()
+        self.assertEqual(act.compileActions(self.font, []), (None, None))
 
     def testDecompileToXML(self):
         a = otTables.ContextualMorphAction()
@@ -447,6 +454,32 @@ class LigatureMorphActionTest(unittest.TestCase):
                 '</Transition>',
         ])
 
+    def testCompileActions_empty(self):
+        act = otTables.LigatureMorphAction()
+        actions, actionIndex = act.compileActions(self.font, [])
+        self.assertEqual(actions, b'')
+        self.assertEqual(actionIndex, {})
+
+    def testCompileActions_shouldShareSubsequences(self):
+        state = otTables.AATState()
+        t = state.Transitions = {i: otTables.LigatureMorphAction()
+                                 for i in range(3)}
+        ligs = [otTables.LigAction() for _ in range(3)]
+        for i, lig in enumerate(ligs):
+            lig.GlyphIndexDelta = i
+        t[0].Actions = ligs[1:2]
+        t[1].Actions = ligs[0:3]
+        t[2].Actions = ligs[1:3]
+        actions, actionIndex = t[0].compileActions(self.font, [state])
+        self.assertEqual(actions,
+                         deHexStr("00000000 00000001 80000002 80000001"))
+        self.assertEqual(actionIndex, {
+            deHexStr("00000000 00000001 80000002"): 0,
+            deHexStr("00000001 80000002"): 1,
+            deHexStr("80000002"): 2,
+            deHexStr("80000001"): 3,
+        })
+
 
 class InsertionMorphActionTest(unittest.TestCase):
     MORPH_ACTION_XML = [
@@ -483,6 +516,109 @@ class InsertionMorphActionTest(unittest.TestCase):
         a.compile(writer, self.font,
 	          actionIndex={('B', 'C'): 9, ('B', 'A', 'D'): 7})
         self.assertEqual(hexStr(writer.getAllData()), "1234fc4300090007")
+
+    def testCompileActions_empty(self):
+        act = otTables.InsertionMorphAction()
+        actions, actionIndex = act.compileActions(self.font, [])
+        self.assertEqual(actions, b'')
+        self.assertEqual(actionIndex, {})
+
+    def testCompileActions_shouldShareSubsequences(self):
+        state = otTables.AATState()
+        t = state.Transitions = {i: otTables.InsertionMorphAction()
+                                 for i in range(3)}
+        t[1].CurrentInsertionAction = []
+        t[0].MarkedInsertionAction = ['A']
+        t[1].CurrentInsertionAction = ['C', 'D']
+        t[1].MarkedInsertionAction = ['B']
+        t[2].CurrentInsertionAction = ['B', 'C', 'D']
+        t[2].MarkedInsertionAction = ['C', 'D']
+        actions, actionIndex = t[0].compileActions(self.font, [state])
+        self.assertEqual(actions, deHexStr('0002 0003 0004 0001'))
+        self.assertEqual(actionIndex, {
+            ('A',): 3,
+            ('B',): 0,
+            ('B', 'C'): 0,
+            ('B', 'C', 'D'): 0,
+            ('C',): 1,
+            ('C', 'D'): 1,
+            ('D',): 2,
+        })
+
+
+class SplitMultipleSubstTest:
+    def overflow(self, itemName, itemRecord):
+        from fontTools.otlLib.builder import buildMultipleSubstSubtable
+        from fontTools.ttLib.tables.otBase import OverflowErrorRecord
+
+        oldSubTable = buildMultipleSubstSubtable({'e': 1, 'a': 2, 'b': 3, 'c': 4, 'd': 5})
+        oldSubTable.Format = 1
+        newSubTable = otTables.MultipleSubst()
+
+        ok = otTables.splitMultipleSubst(oldSubTable, newSubTable, OverflowErrorRecord((None, None, None, itemName, itemRecord)))
+
+        assert ok
+        assert oldSubTable.Format == newSubTable.Format
+        return oldSubTable.mapping, newSubTable.mapping
+
+    def test_Coverage(self):
+        oldMapping, newMapping = self.overflow('Coverage', None)
+        assert oldMapping == {'a': 2, 'b': 3}
+        assert newMapping == {'c': 4, 'd': 5, 'e': 1}
+
+    def test_RangeRecord(self):
+        oldMapping, newMapping = self.overflow('RangeRecord', None)
+        assert oldMapping == {'a': 2, 'b': 3}
+        assert newMapping == {'c': 4, 'd': 5, 'e': 1}
+
+    def test_Sequence(self):
+        oldMapping, newMapping = self.overflow('Sequence', 4)
+        assert oldMapping == {'a': 2, 'b': 3,'c': 4}
+        assert newMapping == {'d': 5, 'e': 1}
+
+
+def test_splitMarkBasePos():
+	from fontTools.otlLib.builder import buildAnchor, buildMarkBasePosSubtable
+
+	marks = {
+		"acutecomb": (0, buildAnchor(0, 600)),
+		"gravecomb": (0, buildAnchor(0, 590)),
+		"cedillacomb": (1, buildAnchor(0, 0)),
+	}
+	bases = {
+		"a": {
+			0: buildAnchor(350, 500),
+			1: None,
+		},
+		"c": {
+			0: buildAnchor(300, 700),
+			1: buildAnchor(300, 0),
+		},
+	}
+	glyphOrder = ["a", "c", "acutecomb", "gravecomb", "cedillacomb"]
+	glyphMap = {g: i for i, g in enumerate(glyphOrder)}
+
+	oldSubTable = buildMarkBasePosSubtable(marks, bases, glyphMap)
+	oldSubTable.MarkCoverage.Format = oldSubTable.BaseCoverage.Format = 1
+	newSubTable = otTables.MarkBasePos()
+
+	ok = otTables.splitMarkBasePos(oldSubTable, newSubTable, overflowRecord=None)
+
+	assert ok
+	assert oldSubTable.Format == newSubTable.Format
+	assert oldSubTable.MarkCoverage.glyphs == [
+		"acutecomb", "gravecomb"
+	]
+	assert newSubTable.MarkCoverage.glyphs == ["cedillacomb"]
+	assert newSubTable.MarkCoverage.Format == 1
+	assert oldSubTable.BaseCoverage.glyphs == newSubTable.BaseCoverage.glyphs
+	assert newSubTable.BaseCoverage.Format == 1
+	assert oldSubTable.ClassCount == newSubTable.ClassCount == 1
+	assert oldSubTable.MarkArray.MarkCount == 2
+	assert newSubTable.MarkArray.MarkCount == 1
+	assert oldSubTable.BaseArray.BaseCount == newSubTable.BaseArray.BaseCount
+	assert newSubTable.BaseArray.BaseRecord[0].BaseAnchor[0] is None
+	assert newSubTable.BaseArray.BaseRecord[1].BaseAnchor[0] == buildAnchor(300, 0)
 
 
 if __name__ == "__main__":

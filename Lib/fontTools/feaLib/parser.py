@@ -1,5 +1,3 @@
-from __future__ import print_function, division, absolute_import
-from __future__ import unicode_literals
 from fontTools.feaLib.error import FeatureLibError
 from fontTools.feaLib.lexer import Lexer, IncludingLexer, NonIncludingLexer
 from fontTools.misc.encodingTools import getEncoding
@@ -404,7 +402,9 @@ class Parser(object):
             return ([], prefix, [None] * len(prefix), values, [], hasMarks)
         else:
             assert not any(values[:len(prefix)]), values
-            values = values[len(prefix):][:len(glyphs)]
+            format1 = values[len(prefix):][:len(glyphs)]
+            format2 = values[(len(prefix) + len(glyphs)):][:len(suffix)]
+            values = format2 if format2 and isinstance(format2[0], self.ast.ValueRecord) else format1
             return (prefix, glyphs, lookups, values, suffix, hasMarks)
 
     def parse_chain_context_(self):
@@ -524,6 +524,7 @@ class Parser(object):
             return self.ast.LookupFlagStatement(value, location=location)
 
         # format A: "lookupflag RightToLeft MarkAttachmentType @M;"
+        value_seen = False
         value, markAttachment, markFilteringSet = 0, None, None
         flags = {
             "RightToLeft": 1, "IgnoreBaseGlyphs": 2,
@@ -543,12 +544,18 @@ class Parser(object):
                 self.expect_keyword_("UseMarkFilteringSet")
                 markFilteringSet = self.parse_class_name_()
             elif self.next_token_ in flags:
+                value_seen = True
                 value = value | flags[self.expect_name_()]
             else:
                 raise FeatureLibError(
                     '"%s" is not a recognized lookupflag' % self.next_token_,
                     self.next_token_location_)
         self.expect_symbol_(";")
+
+        if not any([value_seen, markAttachment, markFilteringSet]):
+            raise FeatureLibError(
+                'lookupflag must have a value', self.next_token_location_)
+
         return self.ast.LookupFlagStatement(value,
                                             markAttachment=markAttachment,
                                             markFilteringSet=markFilteringSet,
@@ -753,7 +760,8 @@ class Parser(object):
                 num_lookups == 0):
             return self.ast.MultipleSubstStatement(
                 old_prefix, tuple(old[0].glyphSet())[0], old_suffix,
-                tuple([list(n.glyphSet())[0] for n in new]), location=location)
+                tuple([list(n.glyphSet())[0] for n in new]),
+                forceChain=hasMarks, location=location)
 
         # GSUB lookup type 4: Ligature substitution.
         # Format: "substitute f f i by f_f_i;"
@@ -968,14 +976,14 @@ class Parser(object):
     def parse_name_(self):
         platEncID = None
         langID = None
-        if self.next_token_type_ == Lexer.NUMBER:
-            platformID = self.expect_number_()
+        if self.next_token_type_ in Lexer.NUMBERS:
+            platformID = self.expect_any_number_()
             location = self.cur_token_location_
             if platformID not in (1, 3):
                 raise FeatureLibError("Expected platform id 1 or 3", location)
-            if self.next_token_type_ == Lexer.NUMBER:
-                platEncID = self.expect_number_()
-                langID = self.expect_number_()
+            if self.next_token_type_ in Lexer.NUMBERS:
+                platEncID = self.expect_any_number_()
+                langID = self.expect_any_number_()
         else:
             platformID = 3
             location = self.cur_token_location_
@@ -998,7 +1006,7 @@ class Parser(object):
 
     def parse_nameid_(self):
         assert self.cur_token_ == "nameid", self.cur_token_
-        location, nameID = self.cur_token_location_, self.expect_number_()
+        location, nameID = self.cur_token_location_, self.expect_any_number_()
         if nameID > 32767:
             raise FeatureLibError("Name id value cannot be greater than 32767",
                                   self.cur_token_location_)
@@ -1153,7 +1161,7 @@ class Parser(object):
             name = self.expect_name_()
             if name == "NULL":
                 self.expect_symbol_(">")
-                return None
+                return self.ast.ValueRecord()
             vrd = self.valuerecords_.resolve(name)
             if vrd is None:
                 raise FeatureLibError("Unknown valueRecordDef \"%s\"" % name,
@@ -1207,10 +1215,6 @@ class Parser(object):
         script = self.expect_script_tag_()
         language = self.expect_language_tag_()
         self.expect_symbol_(";")
-        if script == "DFLT" and language != "dflt":
-            raise FeatureLibError(
-                'For script "DFLT", the language must be "dflt"',
-                self.cur_token_location_)
         return self.ast.LanguageSystemStatement(script, language,
                                                 location=location)
 
@@ -1346,7 +1350,7 @@ class Parser(object):
 
     def parse_cvCharacter_(self, tag):
         assert self.cur_token_ == "Character", self.cur_token_
-        location, character = self.cur_token_location_, self.expect_decimal_or_hexadecimal_()
+        location, character = self.cur_token_location_, self.expect_any_number_()
         self.expect_symbol_(";")
         if not (0xFFFFFF >= character >= 0):
             raise FeatureLibError("Character value must be between "
@@ -1444,7 +1448,7 @@ class Parser(object):
             if isinstance(s, self.ast.SingleSubstStatement):
                 has_single = not any([s.prefix, s.suffix, s.forceChain])
             elif isinstance(s, self.ast.MultipleSubstStatement):
-                has_multiple = not any([s.prefix, s.suffix])
+                has_multiple = not any([s.prefix, s.suffix, s.forceChain])
 
         # Upgrade all single substitutions to multiple substitutions.
         if has_single and has_multiple:
@@ -1453,7 +1457,7 @@ class Parser(object):
                     statements[i] = self.ast.MultipleSubstStatement(
                         s.prefix, s.glyphs[0].glyphSet()[0], s.suffix,
                         [r.glyphSet()[0] for r in s.replacements],
-                        location=s.location)
+                        s.forceChain, location=s.location)
 
     def is_cur_keyword_(self, k):
         if self.cur_token_type_ is Lexer.NAME:
@@ -1552,12 +1556,18 @@ class Parser(object):
             return self.cur_token_
         raise FeatureLibError("Expected a name", self.cur_token_location_)
 
-    # TODO: Don't allow this method to accept hexadecimal values
     def expect_number_(self):
         self.advance_lexer_()
         if self.cur_token_type_ is Lexer.NUMBER:
             return self.cur_token_
         raise FeatureLibError("Expected a number", self.cur_token_location_)
+
+    def expect_any_number_(self):
+        self.advance_lexer_()
+        if self.cur_token_type_ in Lexer.NUMBERS:
+            return self.cur_token_
+        raise FeatureLibError("Expected a decimal, hexadecimal or octal number",
+                              self.cur_token_location_)
 
     def expect_float_(self):
         self.advance_lexer_()
@@ -1566,7 +1576,6 @@ class Parser(object):
         raise FeatureLibError("Expected a floating-point number",
                               self.cur_token_location_)
 
-    # TODO: Don't allow this method to accept hexadecimal values
     def expect_decipoint_(self):
         if self.next_token_type_ == Lexer.FLOAT:
             return self.expect_float_()
@@ -1575,18 +1584,6 @@ class Parser(object):
         else:
             raise FeatureLibError("Expected an integer or floating-point number",
                                   self.cur_token_location_)
-
-    def expect_decimal_or_hexadecimal_(self):
-        # the lexer returns the same token type 'NUMBER' for either decimal or
-        # hexadecimal integers, and casts them both to a `int` type, so it's
-        # impossible to distinguish the two here. This method is implemented
-        # the same as `expect_number_`, only it gives a more informative
-        # error message
-        self.advance_lexer_()
-        if self.cur_token_type_ is Lexer.NUMBER:
-            return self.cur_token_
-        raise FeatureLibError("Expected a decimal or hexadecimal number",
-                              self.cur_token_location_)
 
     def expect_string_(self):
         self.advance_lexer_()

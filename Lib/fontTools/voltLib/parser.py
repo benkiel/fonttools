@@ -1,5 +1,3 @@
-from __future__ import (
-    print_function, division, absolute_import, unicode_literals)
 from collections import OrderedDict
 import fontTools.voltLib.ast as ast
 from fontTools.voltLib.lexer import Lexer
@@ -32,9 +30,18 @@ class Parser(object):
         self.lookups_ = SymbolTable()
         self.next_token_type_, self.next_token_ = (None, None)
         self.next_token_location_ = None
-        with open(path, "r") as f:
-            self.lexer_ = Lexer(f.read(), path)
+        self.make_lexer_(path)
         self.advance_lexer_()
+
+    def make_lexer_(self, file_or_path):
+        if hasattr(file_or_path, "read"):
+            filename = getattr(file_or_path, "name", None)
+            data = file_or_path.read()
+        else:
+            filename = file_or_path
+            with open(file_or_path, "r") as f:
+                data = f.read()
+        self.lexer_ = Lexer(data, filename)
 
     def parse(self):
         statements = self.doc_.statements
@@ -44,10 +51,7 @@ class Parser(object):
                 func = getattr(self, PARSE_FUNCS[self.cur_token_])
                 statements.append(func())
             elif self.is_cur_keyword_("END"):
-                if self.next_token_type_ is not None:
-                    raise VoltLibError("Expected the end of the file",
-                                       self.cur_token_location_)
-                return self.doc_
+                break
             else:
                 raise VoltLibError(
                     "Expected " + ", ".join(sorted(PARSE_FUNCS.keys())),
@@ -76,7 +80,7 @@ class Parser(object):
         if self.next_token_ == "TYPE":
             self.expect_keyword_("TYPE")
             gtype = self.expect_name_()
-            assert gtype in ("BASE", "LIGATURE", "MARK")
+            assert gtype in ("BASE", "LIGATURE", "MARK", "COMPONENT")
         components = None
         if self.next_token_ == "COMPONENTS":
             self.expect_keyword_("COMPONENTS")
@@ -99,7 +103,6 @@ class Parser(object):
         name = self.expect_string_()
         enum = None
         if self.next_token_ == "ENUM":
-            self.expect_keyword_("ENUM")
             enum = self.parse_enum_()
         self.expect_keyword_("END_GROUP")
         if self.groups_.resolve(name) is not None:
@@ -206,18 +209,22 @@ class Parser(object):
             self.advance_lexer_()
             process_base = False
         process_marks = True
+        mark_glyph_set = None
         if self.next_token_ == "PROCESS_MARKS":
             self.advance_lexer_()
             if self.next_token_ == "MARK_GLYPH_SET":
                 self.advance_lexer_()
-                process_marks = self.expect_string_()
-            elif self.next_token_type_ == Lexer.STRING:
-                process_marks = self.expect_string_()
+                mark_glyph_set = self.expect_string_()
             elif self.next_token_ == "ALL":
                 self.advance_lexer_()
+            elif self.next_token_ == "NONE":
+                self.advance_lexer_()
+                process_marks = False
+            elif self.next_token_type_ == Lexer.STRING:
+                process_marks = self.expect_string_()
             else:
                 raise VoltLibError(
-                    "Expected ALL, MARK_GLYPH_SET or an ID. "
+                    "Expected ALL, NONE, MARK_GLYPH_SET or an ID. "
                     "Got %s" % (self.next_token_type_),
                     location)
         elif self.next_token_ == "SKIP_MARKS":
@@ -252,8 +259,8 @@ class Parser(object):
                 "Got %s" % (as_pos_or_sub),
                 location)
         def_lookup = ast.LookupDefinition(
-            name, process_base, process_marks, direction, reversal,
-            comments, context, sub, pos, location=location)
+            name, process_base, process_marks, mark_glyph_set, direction,
+            reversal, comments, context, sub, pos, location=location)
         self.lookups_.define(name, def_lookup)
         return def_lookup
 
@@ -422,16 +429,17 @@ class Parser(object):
         gid = self.expect_number_()
         self.expect_keyword_("GLYPH")
         glyph_name = self.expect_name_()
-        # check for duplicate anchor names on this glyph
-        if (glyph_name in self.anchors_
-                and self.anchors_[glyph_name].resolve(name) is not None):
-            raise VoltLibError(
-                'Anchor "%s" already defined, '
-                'anchor names are case insensitive' % name,
-                location
-            )
         self.expect_keyword_("COMPONENT")
         component = self.expect_number_()
+        # check for duplicate anchor names on this glyph
+        if glyph_name in self.anchors_:
+            anchor = self.anchors_[glyph_name].resolve(name)
+            if anchor is not None and anchor.component == component:
+                raise VoltLibError(
+                    'Anchor "%s" already defined, '
+                    'anchor names are case insensitive' % name,
+                    location
+                )
         if self.next_token_ == "LOCKED":
             locked = True
             self.advance_lexer_()
@@ -500,8 +508,9 @@ class Parser(object):
         return unicode_values if unicode_values != [] else None
 
     def parse_enum_(self):
-        assert self.is_cur_keyword_("ENUM")
-        enum = self.parse_coverage_()
+        self.expect_keyword_("ENUM")
+        location = self.cur_token_location_
+        enum = ast.Enum(self.parse_coverage_(), location=location)
         self.expect_keyword_("END_ENUM")
         return enum
 
@@ -510,42 +519,29 @@ class Parser(object):
         location = self.cur_token_location_
         while self.next_token_ in ("GLYPH", "GROUP", "RANGE", "ENUM"):
             if self.next_token_ == "ENUM":
-                self.advance_lexer_()
                 enum = self.parse_enum_()
                 coverage.append(enum)
             elif self.next_token_ == "GLYPH":
                 self.expect_keyword_("GLYPH")
                 name = self.expect_string_()
-                coverage.append(name)
+                coverage.append(ast.GlyphName(name, location=location))
             elif self.next_token_ == "GROUP":
                 self.expect_keyword_("GROUP")
                 name = self.expect_string_()
-                # resolved_group = self.groups_.resolve(name)
-                group = (name,)
-                coverage.append(group)
-                # if resolved_group is not None:
-                #     coverage.extend(resolved_group.enum)
-                # # TODO: check that group exists after all groups are defined
-                # else:
-                #     group = (name,)
-                #     coverage.append(group)
-                #     # raise VoltLibError(
-                #     #     'Glyph group "%s" is not defined' % name,
-                #     #     location)
+                coverage.append(ast.GroupName(name, self, location=location))
             elif self.next_token_ == "RANGE":
                 self.expect_keyword_("RANGE")
                 start = self.expect_string_()
                 self.expect_keyword_("TO")
                 end = self.expect_string_()
-                coverage.append((start, end))
+                coverage.append(ast.Range(start, end, self, location=location))
         return tuple(coverage)
 
     def resolve_group(self, group_name):
         return self.groups_.resolve(group_name)
 
     def glyph_range(self, start, end):
-        rng = self.glyphs_.range(start, end)
-        return frozenset(rng)
+        return self.glyphs_.range(start, end)
 
     def parse_ppem_(self):
         location = self.cur_token_location_
@@ -601,6 +597,8 @@ class Parser(object):
         self.cur_token_type_, self.cur_token_, self.cur_token_location_ = (
             self.next_token_type_, self.next_token_, self.next_token_location_)
         try:
+            if self.is_cur_keyword_("END"):
+                raise StopIteration
             (self.next_token_type_, self.next_token_,
              self.next_token_location_) = self.lexer_.next()
         except StopIteration:

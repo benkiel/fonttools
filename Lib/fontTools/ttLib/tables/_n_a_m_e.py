@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-from __future__ import print_function, division, absolute_import
-from __future__ import unicode_literals
 from fontTools.misc.py23 import *
 from fontTools.misc import sstruct
 from fontTools.misc.textTools import safeEval
@@ -149,6 +147,31 @@ class table__n_a_m_e(DefaultTable.DefaultTable):
 		else:
 			self.names.append(makeName(string, nameID, platformID, platEncID, langID))
 
+	def removeNames(self, nameID=None, platformID=None, platEncID=None, langID=None):
+		"""Remove any name records identified by the given combination of 'nameID',
+		'platformID', 'platEncID' and 'langID'.
+		"""
+		args = {
+			argName: argValue
+			for argName, argValue in (
+				("nameID", nameID),
+				("platformID", platformID),
+				("platEncID", platEncID),
+				("langID", langID),
+			)
+			if argValue is not None
+		}
+		if not args:
+			# no arguments, nothing to do
+			return
+		self.names = [
+			rec for rec in self.names
+			if any(
+				argValue != getattr(rec, argName)
+				for argName, argValue in args.items()
+			)
+		]
+
 	def _findUnusedNameID(self, minNameID=256):
 		"""Finds an unused name id.
 
@@ -161,7 +184,8 @@ class table__n_a_m_e(DefaultTable.DefaultTable):
 			raise ValueError("nameID must be less than 32768")
 		return nameID
 
-	def addMultilingualName(self, names, ttFont=None, nameID=None):
+	def addMultilingualName(self, names, ttFont=None, nameID=None,
+	                        windows=True, mac=True):
 		"""Add a multilingual name, returning its name ID
 
 		'names' is a dictionary with the name in multiple languages,
@@ -176,6 +200,9 @@ class table__n_a_m_e(DefaultTable.DefaultTable):
 
 		'nameID' is the name ID to be used, or None to let the library
 		pick an unused name ID.
+
+		If 'windows' is True, a platformID=3 name record will be added.
+		If 'mac' is True, a platformID=1 name record will be added.
 		"""
 		if not hasattr(self, 'names'):
 			self.names = []
@@ -184,15 +211,16 @@ class table__n_a_m_e(DefaultTable.DefaultTable):
 		# TODO: Should minimize BCP 47 language codes.
 		# https://github.com/fonttools/fonttools/issues/930
 		for lang, name in sorted(names.items()):
-			# Apple platforms have been recognizing Windows names
-			# since early OSX (~2001), so we only add names
-			# for the Macintosh platform when we cannot not make
-			# a Windows name. This can happen for exotic BCP47
-			# language tags that have no Windows language code.
-			windowsName = _makeWindowsName(name, nameID, lang)
-			if windowsName is not None:
-				self.names.append(windowsName)
-			else:
+			if windows:
+				windowsName = _makeWindowsName(name, nameID, lang)
+				if windowsName is not None:
+					self.names.append(windowsName)
+				else:
+					# We cannot not make a Windows name: make sure we add a
+					# Mac name as a fallback. This can happen for exotic
+					# BCP47 language tags that have no Windows language code.
+					mac = True
+			if mac:
 				macName = _makeMacName(name, nameID, lang, ttFont)
 				if macName is not None:
 					self.names.append(macName)
@@ -387,13 +415,7 @@ class NameRecord(object):
 		"""
 		return tobytes(self.string, encoding=self.getEncoding(), errors=errors)
 
-	def toStr(self, errors='strict'):
-		if str == bytes:
-			# python 2
-			return self.toBytes(errors)
-		else:
-			# python 3
-			return self.toUnicode(errors)
+	toStr = toUnicode
 
 	def toXML(self, writer, ttFont):
 		try:
@@ -437,22 +459,32 @@ class NameRecord(object):
 		if type(self) != type(other):
 			return NotImplemented
 
-		# implemented so that list.sort() sorts according to the spec.
-		selfTuple = (
-			getattr(self, "platformID", None),
-			getattr(self, "platEncID", None),
-			getattr(self, "langID", None),
-			getattr(self, "nameID", None),
-			getattr(self, "string", None),
-		)
-		otherTuple = (
-			getattr(other, "platformID", None),
-			getattr(other, "platEncID", None),
-			getattr(other, "langID", None),
-			getattr(other, "nameID", None),
-			getattr(other, "string", None),
-		)
-		return selfTuple < otherTuple
+		try:
+			# implemented so that list.sort() sorts according to the spec.
+			selfTuple = (
+				self.platformID,
+				self.platEncID,
+				self.langID,
+				self.nameID,
+				self.toBytes(),
+			)
+			otherTuple = (
+				other.platformID,
+				other.platEncID,
+				other.langID,
+				other.nameID,
+				other.toBytes(),
+			)
+			return selfTuple < otherTuple
+		except (UnicodeEncodeError, AttributeError):
+			# This can only happen for
+			# 1) an object that is not a NameRecord, or
+			# 2) an unlikely incomplete NameRecord object which has not been
+			#    fully populated, or
+			# 3) when all IDs are identical but the strings can't be encoded
+			#    for their platform encoding.
+			# In all cases it is best to return NotImplemented.
+			return NotImplemented
 
 	def __repr__(self):
 		return "<NameRecord NameID=%d; PlatformID=%d; LanguageID=%d>" % (

@@ -1,5 +1,3 @@
-from __future__ import print_function, division, absolute_import
-from __future__ import unicode_literals
 from fontTools.misc.py23 import *
 from fontTools.feaLib.error import FeatureLibError, IncludedFeaNotFound
 from fontTools.feaLib.lexer import IncludingLexer, Lexer
@@ -39,6 +37,7 @@ class LexerTest(unittest.TestCase):
 
     def test_glyphclass(self):
         self.assertEqual(lex("@Vowel.sc"), [(Lexer.GLYPHCLASS, "Vowel.sc")])
+        self.assertEqual(lex("@Vowel-sc"), [(Lexer.GLYPHCLASS, "Vowel-sc")])
         self.assertRaisesRegex(FeatureLibError,
                                "Expected glyph class", lex, "@(a)")
         self.assertRaisesRegex(FeatureLibError,
@@ -68,8 +67,9 @@ class LexerTest(unittest.TestCase):
     def test_number(self):
         self.assertEqual(lex("123 -456"),
                          [(Lexer.NUMBER, 123), (Lexer.NUMBER, -456)])
-        self.assertEqual(lex("0xCAFED00D"), [(Lexer.NUMBER, 0xCAFED00D)])
-        self.assertEqual(lex("0xcafed00d"), [(Lexer.NUMBER, 0xCAFED00D)])
+        self.assertEqual(lex("0xCAFED00D"), [(Lexer.HEXADECIMAL, 0xCAFED00D)])
+        self.assertEqual(lex("0xcafed00d"), [(Lexer.HEXADECIMAL, 0xCAFED00D)])
+        self.assertEqual(lex("010"), [(Lexer.OCTAL, 0o10)])
 
     def test_float(self):
         self.assertEqual(lex("1.23 -4.5"),

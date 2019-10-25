@@ -1,4 +1,3 @@
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 from fontTools import ttLib
 from fontTools.ttLib.standardGlyphOrder import standardGlyphOrder
@@ -83,9 +82,8 @@ class table__p_o_s_t(DefaultTable.DefaultTable):
 			numGlyphs = ttFont['maxp'].numGlyphs
 		data = data[2:]
 		indices = array.array("H")
-		indices.fromstring(data[:2*numGlyphs])
-		if sys.byteorder != "big":
-			indices.byteswap()
+		indices.frombytes(data[:2*numGlyphs])
+		if sys.byteorder != "big": indices.byteswap()
 		data = data[2*numGlyphs:]
 		self.extraNames = extraNames = unpackPStrings(data)
 		self.glyphOrder = glyphOrder = [""] * int(ttFont['maxp'].numGlyphs)
@@ -133,9 +131,8 @@ class table__p_o_s_t(DefaultTable.DefaultTable):
 		from fontTools import agl
 		numGlyphs = ttFont['maxp'].numGlyphs
 		indices = array.array("H")
-		indices.fromstring(data)
-		if sys.byteorder != "big":
-			indices.byteswap()
+		indices.frombytes(data)
+		if sys.byteorder != "big": indices.byteswap()
 		# In some older fonts, the size of the post table doesn't match
 		# the number of glyphs. Sometimes it's bigger, sometimes smaller.
 		self.glyphOrder = glyphOrder = [''] * int(numGlyphs)
@@ -173,9 +170,8 @@ class table__p_o_s_t(DefaultTable.DefaultTable):
 				extraDict[psName] = len(extraNames)
 				extraNames.append(psName)
 			indices.append(index)
-		if sys.byteorder != "big":
-			indices.byteswap()
-		return struct.pack(">H", numGlyphs) + indices.tostring() + packPStrings(extraNames)
+		if sys.byteorder != "big": indices.byteswap()
+		return struct.pack(">H", numGlyphs) + indices.tobytes() + packPStrings(extraNames)
 
 	def encode_format_4_0(self, ttFont):
 		from fontTools import agl
@@ -191,9 +187,8 @@ class table__p_o_s_t(DefaultTable.DefaultTable):
 				indices.append(int(glyphID[3:],16))
 			else:
 				indices.append(0xFFFF)
-		if sys.byteorder != "big":
-			indices.byteswap()
-		return indices.tostring()
+		if sys.byteorder != "big": indices.byteswap()
+		return indices.tobytes()
 
 	def toXML(self, writer, ttFont):
 		formatstring, names, fixes = sstruct.getformat(postFormat)

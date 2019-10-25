@@ -1,5 +1,4 @@
 # coding: utf-8
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 
 otData = [
@@ -1445,8 +1444,7 @@ otData = [
         ]),
 
 	('InsertionMorph', [
-		('struct', 'StateHeader', None, None, 'Header.'),
-		# TODO: Add missing parts.
+		('STXHeader(InsertionMorphAction)', 'StateTable', None, None, 'Finite-state transducer for glyph insertion.'),
 	]),
 
 	('MorphClass', [
@@ -1511,6 +1509,33 @@ otData = [
 		('int16', 'Top', None, None, 'Control point index for the top-side optical edge, or -1 if this glyph has none.'),
 		('int16', 'Right', None, None, 'Control point index for the right-side optical edge, or -1 if this glyph has none.'),
 		('int16', 'Bottom', None, None, 'Control point index for the bottom-side optical edge, or -1 if this glyph has none.'),
+	]),
+
+	#
+	# TSIC
+	#
+	('TSIC', [
+		('Version', 'Version', None, None, 'Version of table initially set to 0x00010000.'),
+		('uint16', 'Flags', None, None, 'TSIC flags - set to 0'),
+		('uint16', 'AxisCount', None, None, 'Axis count from fvar'),
+		('uint16', 'RecordCount', None, None, 'TSIC record count'),
+		('uint16', 'Reserved', None, None, 'Set to 0'),
+		('Tag', 'AxisArray', 'AxisCount', 0, 'Array of axis tags in fvar order'),
+		('LocationRecord', 'RecordLocations', 'RecordCount', 0, 'Location in variation space of TSIC record'),
+		('TSICRecord', 'Record', 'RecordCount', 0, 'Array of TSIC records'),
+	]),
+
+	('LocationRecord', [
+		('F2Dot14', 'Axis', 'AxisCount', 0, 'Axis record'),
+	]),
+
+	('TSICRecord', [
+		('uint16', 'Flags', None, None, 'Record flags - set to 0'),
+		('uint16', 'NumCVTEntries', None, None, 'Number of CVT number value pairs'),
+		('uint16', 'NameLength', None, None, 'Length of optional user record name'),
+		('uint16', 'NameArray', 'NameLength', 0, 'Unicode 16 name'),
+		('uint16', 'CVTArray', 'NumCVTEntries', 0, 'CVT number array'),
+		('int16', 'CVTValueArray', 'NumCVTEntries', 0, 'CVT value'),
 	]),
 
 ]

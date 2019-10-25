@@ -1,7 +1,5 @@
 """Visualize DesignSpaceDocument and resulting VariationModel."""
 
-from __future__ import print_function, division, absolute_import
-from fontTools.misc.py23 import *
 from fontTools.varLib.models import VariationModel, supportScalar
 from fontTools.designspaceLib import DesignSpaceDocument
 from mpl_toolkits.mplot3d import axes3d
@@ -14,7 +12,7 @@ import sys
 log = logging.getLogger(__name__)
 
 
-def stops(support, count=20):
+def stops(support, count=10):
 	a,b,c = support
 
 	return [a + (b - a) * i / count for i in range(count)] + \
@@ -22,27 +20,87 @@ def stops(support, count=20):
 	       [c]
 
 
+def _plotLocationsDots(locations, axes, subplot, **kwargs):
+	for loc, color in zip(locations, cycle(pyplot.cm.Set1.colors)):
+		if len(axes) == 1:
+			subplot.plot(
+				[loc.get(axes[0], 0)],
+				[1.],
+				'o',
+				color=color,
+				**kwargs
+			)
+		elif len(axes) == 2:
+			subplot.plot(
+				[loc.get(axes[0], 0)],
+				[loc.get(axes[1], 0)],
+				[1.],
+				'o',
+				color=color,
+				**kwargs
+			)
+		else:
+			raise AssertionError(len(axes))
+
+
 def plotLocations(locations, fig, names=None, **kwargs):
-
-	assert len(locations[0].keys()) == 2
-
-	if names is None:
-		names = ['']
-
 	n = len(locations)
 	cols = math.ceil(n**.5)
 	rows = math.ceil(n / cols)
 
+	if names is None:
+		names = [None] * len(locations)
+
 	model = VariationModel(locations)
 	names = [names[model.reverseMapping[i]] for i in range(len(names))]
 
-	ax1, ax2 = sorted(locations[0].keys())
-	for i, (support,color, name) in enumerate(zip(model.supports, cycle(pyplot.cm.Set1.colors), cycle(names))):
+	axes = sorted(locations[0].keys())
+	if len(axes) == 1:
+		_plotLocations2D(
+			model, axes[0], fig, cols, rows, names=names, **kwargs
+		)
+	elif len(axes) == 2:
+		_plotLocations3D(
+			model, axes, fig, cols, rows, names=names, **kwargs
+		)
+	else:
+		raise ValueError("Only 1 or 2 axes are supported")
 
+
+def _plotLocations2D(model, axis, fig, cols, rows, names, **kwargs):
+	for i, (support, color, name) in enumerate(
+		zip(model.supports, cycle(pyplot.cm.Set1.colors), cycle(names))
+	):
+		subplot = fig.add_subplot(rows, cols, i + 1)
+		if name is not None:
+			subplot.set_title(name)
+		subplot.set_xlabel(axis)
+		pyplot.xlim(-1.,+1.)
+
+		Xs = support.get(axis, (-1.,0.,+1.))
+		X, Y = [], []
+		for x in stops(Xs):
+			y = supportScalar({axis:x}, support)
+			X.append(x)
+			Y.append(y)
+		subplot.plot(X, Y, color=color, **kwargs)
+
+		_plotLocationsDots(model.locations, [axis], subplot)
+
+
+def _plotLocations3D(model, axes, fig, rows, cols, names, **kwargs):
+	ax1, ax2 = axes
+
+	for i, (support, color, name) in enumerate(
+		zip(model.supports, cycle(pyplot.cm.Set1.colors), cycle(names))
+	):
 		axis3D = fig.add_subplot(rows, cols, i + 1, projection='3d')
-		axis3D.set_title(name)
+		if name is not None:
+			axis3D.set_title(name)
 		axis3D.set_xlabel(ax1)
 		axis3D.set_ylabel(ax2)
+		pyplot.xlim(-1.,+1.)
+		pyplot.ylim(-1.,+1.)
 
 		Xs = support.get(ax1, (-1.,0.,+1.))
 		Ys = support.get(ax2, (-1.,0.,+1.))
@@ -53,7 +111,7 @@ def plotLocations(locations, fig, names=None, **kwargs):
 				X.append(x)
 				Y.append(y)
 				Z.append(z)
-			axis3D.plot_wireframe(X, Y, Z, color=color, **kwargs)
+			axis3D.plot(X, Y, Z, color=color, **kwargs)
 		for y in stops(Ys):
 			X, Y, Z = [], [], []
 			for x in Xs:
@@ -61,7 +119,9 @@ def plotLocations(locations, fig, names=None, **kwargs):
 				X.append(x)
 				Y.append(y)
 				Z.append(z)
-			axis3D.plot_wireframe(X, Y, Z, color=color, **kwargs)
+			axis3D.plot(X, Y, Z, color=color, **kwargs)
+
+		_plotLocationsDots(model.locations, [ax1, ax2], axis3D)
 
 
 def plotDocument(doc, fig, **kwargs):
@@ -89,6 +149,7 @@ def main(args=None):
 		sys.exit(1)
 
 	fig = pyplot.figure()
+	fig.set_tight_layout(True)
 
 	if len(args) == 1 and args[0].endswith('.designspace'):
 		doc = DesignSpaceDocument()

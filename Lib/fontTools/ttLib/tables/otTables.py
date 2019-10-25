@@ -5,11 +5,9 @@ OpenType subtables.
 Most are constructed upon import from data in otData.py, all are populated with
 converter objects from otConverters.py.
 """
-from __future__ import print_function, division, absolute_import, unicode_literals
 from fontTools.misc.py23 import *
-from fontTools.misc.textTools import safeEval
+from fontTools.misc.textTools import pad, safeEval
 from .otBase import BaseTable, FormatSwitchingBaseTable, ValueRecord
-import operator
 import logging
 import struct
 
@@ -32,6 +30,10 @@ class AATState(object):
 class AATAction(object):
 	_FLAGS = None
 
+	@staticmethod
+	def compileActions(font, states):
+		return (None, None)
+
 	def _writeFlagsToXML(self, xmlWriter):
 		flags = [f for f in self._FLAGS if self.__dict__[f]]
 		if flags:
@@ -50,6 +52,7 @@ class AATAction(object):
 
 class RearrangementMorphAction(AATAction):
 	staticSize = 4
+	actionHeaderSize = 0
 	_FLAGS = ["MarkFirst", "DontAdvance", "MarkLast"]
 
 	_VERBS = {
@@ -131,6 +134,7 @@ class RearrangementMorphAction(AATAction):
 
 class ContextualMorphAction(AATAction):
 	staticSize = 8
+	actionHeaderSize = 0
 	_FLAGS = ["SetMark", "DontAdvance"]
 
 	def __init__(self):
@@ -209,6 +213,10 @@ class LigAction(object):
 
 class LigatureMorphAction(AATAction):
 	staticSize = 6
+
+	# 4 bytes for each of {action,ligComponents,ligatures}Offset
+	actionHeaderSize = 12
+
 	_FLAGS = ["SetComponent", "DontAdvance"]
 
 	def __init__(self):
@@ -250,6 +258,34 @@ class LigatureMorphAction(AATAction):
 				actionReader, actionIndex)
 		else:
 			self.Actions = []
+
+	@staticmethod
+	def compileActions(font, states):
+		result, actions, actionIndex = b"", set(), {}
+		for state in states:
+			for _glyphClass, trans in state.Transitions.items():
+				actions.add(trans.compileLigActions())
+		# Sort the compiled actions in decreasing order of
+		# length, so that the longer sequence come before the
+		# shorter ones.  For each compiled action ABCD, its
+		# suffixes BCD, CD, and D do not be encoded separately
+		# (in case they occur); instead, we can just store an
+		# index that points into the middle of the longer
+		# sequence. Every compiled AAT ligature sequence is
+		# terminated with an end-of-sequence flag, which can
+		# only be set on the last element of the sequence.
+		# Therefore, it is sufficient to consider just the
+		# suffixes.
+		for a in sorted(actions, key=lambda x:(-len(x), x)):
+			if a not in actionIndex:
+				for i in range(0, len(a), 4):
+					suffix = a[i:]
+					suffixIndex = (len(result) + i) // 4
+					actionIndex.setdefault(
+						suffix, suffixIndex)
+				result += a
+		result = pad(result, 4)
+		return (result, actionIndex)
 
 	def compileLigActions(self):
 		result = []
@@ -319,7 +355,7 @@ class LigatureMorphAction(AATAction):
 
 class InsertionMorphAction(AATAction):
 	staticSize = 8
-
+	actionHeaderSize = 4  # 4 bytes for actionOffset
 	_FLAGS = ["SetMark", "DontAdvance",
 	          "CurrentIsKashidaLike", "MarkedIsKashidaLike",
 	          "CurrentInsertBefore", "MarkedInsertBefore"]
@@ -417,6 +453,37 @@ class InsertionMorphAction(AATAction):
 			else:
 				assert False, eltName
 
+	@staticmethod
+	def compileActions(font, states):
+		actions, actionIndex, result = set(), {}, b""
+		for state in states:
+			for _glyphClass, trans in state.Transitions.items():
+				if trans.CurrentInsertionAction is not None:
+					actions.add(tuple(trans.CurrentInsertionAction))
+				if trans.MarkedInsertionAction is not None:
+					actions.add(tuple(trans.MarkedInsertionAction))
+		# Sort the compiled actions in decreasing order of
+		# length, so that the longer sequence come before the
+		# shorter ones.
+		for action in sorted(actions, key=lambda x:(-len(x), x)):
+			# We insert all sub-sequences of the action glyph sequence
+			# into actionIndex. For example, if one action triggers on
+			# glyph sequence [A, B, C, D, E] and another action triggers
+			# on [C, D], we return result=[A, B, C, D, E] (as list of
+			# encoded glyph IDs), and actionIndex={('A','B','C','D','E'): 0,
+			# ('C','D'): 2}.
+			if action in actionIndex:
+				continue
+			for start in range(0, len(action)):
+				startIndex = (len(result) // 2) + start
+				for limit in range(start, len(action)):
+					glyphs = action[start : limit + 1]
+					actionIndex.setdefault(glyphs, startIndex)
+			for glyph in action:
+				glyphID = font.getGlyphID(glyph)
+				result += struct.pack(">H", glyphID)
+		return result, actionIndex
+
 
 class FeatureParams(BaseTable):
 
@@ -482,7 +549,7 @@ class Coverage(FormatSwitchingBaseTable):
 				glyphs.extend(glyphOrder[glyphID] for glyphID in range(startID, endID))
 		else:
 			self.glyphs = []
-			log.warning("Unknown Coverage format: %s" % self.Format)
+			log.warning("Unknown Coverage format: %s", self.Format)
 
 	def preWrite(self, font):
 		glyphs = getattr(self, "glyphs", None)
@@ -629,18 +696,19 @@ class SingleSubst(FormatSwitchingBaseTable):
 	def postRead(self, rawTable, font):
 		mapping = {}
 		input = _getGlyphsFromCoverageTable(rawTable["Coverage"])
-		lenMapping = len(input)
 		if self.Format == 1:
 			delta = rawTable["DeltaGlyphID"]
 			inputGIDS =  [ font.getGlyphID(name) for name in input ]
 			outGIDS = [ (glyphID + delta) % 65536 for glyphID in inputGIDS ]
 			outNames = [ font.getGlyphName(glyphID) for glyphID in outGIDS ]
-			list(map(operator.setitem, [mapping]*lenMapping, input, outNames))
+			for inp, out in zip(input, outNames):
+				mapping[inp] = out
 		elif self.Format == 2:
 			assert len(input) == rawTable["GlyphCount"], \
 					"invalid SingleSubstFormat2 table"
 			subst = rawTable["Substitute"]
-			list(map(operator.setitem, [mapping]*lenMapping, input, subst))
+			for inp, sub in zip(input, subst):
+				mapping[inp] = sub
 		else:
 			assert 0, "unknown format: %s" % self.Format
 		self.mapping = mapping
@@ -830,7 +898,7 @@ class ClassDef(FormatSwitchingBaseTable):
 					if cls:
 						classDefs[glyphOrder[glyphID]] = cls
 		else:
-			assert 0, "unknown format: %s" % self.Format
+			log.warning("Unknown ClassDef format: %s", self.Format)
 		self.classDefs = classDefs
 
 	def _getClassRanges(self, font):
@@ -1061,6 +1129,7 @@ class LigatureSubst(FormatSwitchingBaseTable):
 			lig.LigGlyph = attrs["glyph"]
 			components = attrs["components"]
 			lig.Component = components.split(",") if components else []
+			lig.CompCount = len(lig.Component)
 			ligs.append(lig)
 
 
@@ -1155,6 +1224,32 @@ def fixLookupOverFlows(ttf, overflowRecord):
 		extSubTable.ExtSubTable = subTable
 		lookup.SubTable[si] = extSubTable
 	ok = 1
+	return ok
+
+def splitMultipleSubst(oldSubTable, newSubTable, overflowRecord):
+	ok = 1
+	newSubTable.Format = oldSubTable.Format
+	oldMapping = sorted(oldSubTable.mapping.items())
+	oldLen = len(oldMapping)
+
+	if overflowRecord.itemName in ['Coverage', 'RangeRecord']:
+		# Coverage table is written last. Overflow is to or within the
+		# the coverage table. We will just cut the subtable in half.
+		newLen = oldLen // 2
+
+	elif overflowRecord.itemName == 'Sequence':
+		# We just need to back up by two items from the overflowed
+		# Sequence index to make sure the offset to the Coverage table
+		# doesn't overflow.
+		newLen = overflowRecord.itemIndex - 1
+
+	newSubTable.mapping = {}
+	for i in range(newLen, oldLen):
+		item = oldMapping[i]
+		key = item[0]
+		newSubTable.mapping[key] = item[1]
+		del oldSubTable.mapping[key]
+
 	return ok
 
 def splitAlternateSubst(oldSubTable, newSubTable, overflowRecord):
@@ -1281,9 +1376,70 @@ def splitPairPos(oldSubTable, newSubTable, overflowRecord):
 	return ok
 
 
+def splitMarkBasePos(oldSubTable, newSubTable, overflowRecord):
+	# split half of the mark classes to the new subtable
+	classCount = oldSubTable.ClassCount
+	if classCount < 2:
+		# oh well, not much left to split...
+		return False
+
+	oldClassCount = classCount // 2
+	newClassCount = classCount - oldClassCount
+
+	oldMarkCoverage, oldMarkRecords = [], []
+	newMarkCoverage, newMarkRecords = [], []
+	for glyphName, markRecord in zip(
+		oldSubTable.MarkCoverage.glyphs,
+		oldSubTable.MarkArray.MarkRecord
+	):
+		if markRecord.Class < oldClassCount:
+			oldMarkCoverage.append(glyphName)
+			oldMarkRecords.append(markRecord)
+		else:
+			newMarkCoverage.append(glyphName)
+			newMarkRecords.append(markRecord)
+
+	oldBaseRecords, newBaseRecords = [], []
+	for rec in oldSubTable.BaseArray.BaseRecord:
+		oldBaseRecord, newBaseRecord = rec.__class__(), rec.__class__()
+		oldBaseRecord.BaseAnchor = rec.BaseAnchor[:oldClassCount]
+		newBaseRecord.BaseAnchor = rec.BaseAnchor[oldClassCount:]
+		oldBaseRecords.append(oldBaseRecord)
+		newBaseRecords.append(newBaseRecord)
+
+	newSubTable.Format = oldSubTable.Format
+
+	oldSubTable.MarkCoverage.glyphs = oldMarkCoverage
+	newSubTable.MarkCoverage = oldSubTable.MarkCoverage.__class__()
+	newSubTable.MarkCoverage.Format = oldSubTable.MarkCoverage.Format
+	newSubTable.MarkCoverage.glyphs = newMarkCoverage
+
+	# share the same BaseCoverage in both halves
+	newSubTable.BaseCoverage = oldSubTable.BaseCoverage
+
+	oldSubTable.ClassCount = oldClassCount
+	newSubTable.ClassCount = newClassCount
+
+	oldSubTable.MarkArray.MarkRecord = oldMarkRecords
+	newSubTable.MarkArray = oldSubTable.MarkArray.__class__()
+	newSubTable.MarkArray.MarkRecord = newMarkRecords
+
+	oldSubTable.MarkArray.MarkCount = len(oldMarkRecords)
+	newSubTable.MarkArray.MarkCount = len(newMarkRecords)
+
+	oldSubTable.BaseArray.BaseRecord = oldBaseRecords
+	newSubTable.BaseArray = oldSubTable.BaseArray.__class__()
+	newSubTable.BaseArray.BaseRecord = newBaseRecords
+
+	oldSubTable.BaseArray.BaseCount = len(oldBaseRecords)
+	newSubTable.BaseArray.BaseCount = len(newBaseRecords)
+
+	return True
+
+
 splitTable = {	'GSUB': {
 #					1: splitSingleSubst,
-#					2: splitMultipleSubst,
+					2: splitMultipleSubst,
 					3: splitAlternateSubst,
 					4: splitLigatureSubst,
 #					5: splitContextSubst,
@@ -1295,7 +1451,7 @@ splitTable = {	'GSUB': {
 #					1: splitSinglePos,
 					2: splitPairPos,
 #					3: splitCursivePos,
-#					4: splitMarkBasePos,
+					4: splitMarkBasePos,
 #					5: splitMarkLigPos,
 #					6: splitMarkMarkPos,
 #					7: splitContextPos,
@@ -1309,7 +1465,6 @@ def fixSubTableOverFlows(ttf, overflowRecord):
 	"""
 	An offset has overflowed within a sub-table. We need to divide this subtable into smaller parts.
 	"""
-	ok = 0
 	table = ttf[overflowRecord.tableType].table
 	lookup = table.LookupList.Lookup[overflowRecord.LookupListIndex]
 	subIndex = overflowRecord.SubTableIndex
@@ -1330,7 +1485,7 @@ def fixSubTableOverFlows(ttf, overflowRecord):
 		newExtSubTableClass = lookupTypes[overflowRecord.tableType][extSubTable.__class__.LookupType]
 		newExtSubTable = newExtSubTableClass()
 		newExtSubTable.Format = extSubTable.Format
-		lookup.SubTable.insert(subIndex + 1, newExtSubTable)
+		toInsert = newExtSubTable
 
 		newSubTableClass = lookupTypes[overflowRecord.tableType][subTableType]
 		newSubTable = newSubTableClass()
@@ -1339,7 +1494,7 @@ def fixSubTableOverFlows(ttf, overflowRecord):
 		subTableType = subtable.__class__.LookupType
 		newSubTableClass = lookupTypes[overflowRecord.tableType][subTableType]
 		newSubTable = newSubTableClass()
-		lookup.SubTable.insert(subIndex + 1, newSubTable)
+		toInsert = newSubTable
 
 	if hasattr(lookup, 'SubTableCount'): # may not be defined yet.
 		lookup.SubTableCount = lookup.SubTableCount + 1
@@ -1347,9 +1502,16 @@ def fixSubTableOverFlows(ttf, overflowRecord):
 	try:
 		splitFunc = splitTable[overflowRecord.tableType][subTableType]
 	except KeyError:
-		return ok
+		log.error(
+			"Don't know how to split %s lookup type %s",
+			overflowRecord.tableType,
+			subTableType,
+		)
+		return False
 
 	ok = splitFunc(subtable, newSubTable, overflowRecord)
+	if ok:
+		lookup.SubTable.insert(subIndex + 1, toInsert)
 	return ok
 
 # End of OverFlow logic
@@ -1359,7 +1521,7 @@ def _buildClasses():
 	import re
 	from .otData import otData
 
-	formatPat = re.compile("([A-Za-z0-9]+)Format(\d+)$")
+	formatPat = re.compile(r"([A-Za-z0-9]+)Format(\d+)$")
 	namespace = globals()
 
 	# populate module with classes
@@ -1414,7 +1576,7 @@ def _buildClasses():
 			2: LigatureMorph,
 			# 3: Reserved,
 			4: NoncontextualMorph,
-			# 5: InsertionMorph,
+			5: InsertionMorph,
 		},
 	}
 	lookupTypes['JSTF'] = lookupTypes['GPOS']  # JSTF contains GPOS

@@ -2,13 +2,14 @@
 #
 # Google Author(s): Behdad Esfahbod
 
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
+from fontTools.misc.fixedTools import otRound
 from fontTools import ttLib
 from fontTools.ttLib.tables import otTables
-from fontTools.misc import psCharStrings
+from fontTools.otlLib.maxContextCalc import maxCtxFont
 from fontTools.pens.basePen import NullPen
 from fontTools.misc.loggingTools import Timer
+from fontTools.subset.cff import *
 from fontTools.varLib import varStore
 import sys
 import struct
@@ -122,6 +123,8 @@ Output options:
 
 Glyph set expansion:
   These options control how additional glyphs are added to the subset.
+  --retain-gids
+      Retain glyph indices; just empty glyphs not needed in-place.
   --notdef-glyph
       Add the '.notdef' glyph to the subset (ie, keep it). [default]
   --no-notdef-glyph
@@ -144,6 +147,10 @@ Glyph set expansion:
   --no-recommended-glyphs
       Do not add glyphs 0, 1, 2, and 3 to the subset, unless specified in
       glyph set. [default]
+  --no-layout-closure
+      Do not expand glyph set to add glyphs produced by OpenType layout
+      features.  Instead, OpenType layout features will be subset to only
+      rules that are relevant to the otherwise-specified glyph set.
   --layout-features[+|-]=<feature>[,<feature>...]
       Specify (=), add to (+=) or exclude from (-=) the comma-separated
       set of OpenType layout feature tags that will be preserved.
@@ -167,6 +174,10 @@ Glyph set expansion:
             * Keep all features.
         --layout-features+=aalt --layout-features-=vrt2
             * Keep default set of features plus 'aalt', but drop 'vrt2'.
+  --layout-scripts[+|-]=<script>[,<script>...]
+      Specify (=), add to (+=) or exclude from (-=) the comma-separated
+      set of OpenType layout script tags that will be preserved.  By
+      default all scripts are retained ('*').
 
 Hinting options:
   --hinting
@@ -196,8 +207,7 @@ Font table options:
       set of tables that will be be dropped.
       By default, the following tables are dropped:
       'BASE', 'JSTF', 'DSIG', 'EBDT', 'EBLC', 'EBSC', 'SVG ', 'PCLT', 'LTSH'
-      and Graphite tables: 'Feat', 'Glat', 'Gloc', 'Silf', 'Sill'
-      and color tables: 'CBLC', 'CBDT', 'sbix'.
+      and Graphite tables: 'Feat', 'Glat', 'Gloc', 'Silf', 'Sill'.
       The tool will attempt to subset the remaining tables.
       Examples:
         --drop-tables-='SVG '
@@ -212,8 +222,8 @@ Font table options:
       Add to the set of tables that will not be subsetted.
       By default, the following tables are included in this list, as
       they do not need subsetting (ignore the fact that 'loca' is listed
-      here): 'gasp', 'head', 'hhea', 'maxp', 'vhea', 'OS/2', 'loca',
-      'name', 'cvt ', 'fpgm', 'prep', 'VMDX', 'DSIG', 'CPAL', 'MVAR', 'STAT'.
+      here): 'gasp', 'head', 'hhea', 'maxp', 'vhea', 'OS/2', 'loca', 'name',
+      'cvt ', 'fpgm', 'prep', 'VMDX', 'DSIG', 'CPAL', 'MVAR', 'cvar', 'STAT'.
       By default, tables that the tool does not know how to subset and are not
       specified here will be dropped from the font, unless --passthrough-tables
       option is passed.
@@ -255,7 +265,7 @@ Font naming options:
   --name-legacy
       Keep legacy (non-Unicode) 'name' table entries (0.x, 1.x etc.).
       XXX Note: This might be needed for some fonts that have no Unicode name
-      entires for English. See: https://github.com/behdad/fonttools/issues/146
+      entires for English. See: https://github.com/fonttools/fonttools/issues/146
   --no-name-legacy
       Drop legacy (non-Unicode) 'name' table entries [default]
   --name-languages[+|-]=<langID>[,<langID>]
@@ -311,6 +321,12 @@ Other font-specific options:
       Update the 'OS/2 xAvgCharWidth' field after subsetting.
   --no-recalc-average-width
       Don't change the 'OS/2 xAvgCharWidth' field. [default]
+  --recalc-max-context
+      Update the 'OS/2 usMaxContext' field after subsetting.
+  --no-recalc-max-context
+      Don't change the 'OS/2 usMaxContext' field. [default]
+  --font-number=<number>
+      Select font number for TrueType Collection (.ttc/.otc), starting from 0.
 
 Application options:
   --verbose
@@ -367,15 +383,12 @@ def _add_method(*clazzes):
 def _uniq_sort(l):
 	return sorted(set(l))
 
-def _set_update(s, *others):
-	# Jython's set.update only takes one other argument.
-	# Emulate real set.update...
-	for other in others:
-		s.update(other)
-
 def _dict_subset(d, glyphs):
 	return {g:d[g] for g in glyphs}
 
+def _list_subset(l, indices):
+	count = len(l)
+	return [l[i] for i in indices if i < count]
 
 @_add_method(otTables.Coverage)
 def intersect(self, glyphs):
@@ -446,7 +459,7 @@ def subset_glyphs(self, s):
 def closure_glyphs(self, s, cur_glyphs):
 	for glyph, subst in self.mapping.items():
 		if glyph in cur_glyphs:
-			_set_update(s.glyphs, subst)
+			s.glyphs.update(subst)
 
 @_add_method(otTables.MultipleSubst)
 def subset_glyphs(self, s):
@@ -456,23 +469,23 @@ def subset_glyphs(self, s):
 
 @_add_method(otTables.AlternateSubst)
 def closure_glyphs(self, s, cur_glyphs):
-	_set_update(s.glyphs, *(vlist for g,vlist in self.alternates.items()
-				      if g in cur_glyphs))
+	s.glyphs.update(*(vlist for g,vlist in self.alternates.items()
+				if g in cur_glyphs))
 
 @_add_method(otTables.AlternateSubst)
 def subset_glyphs(self, s):
-	self.alternates = {g:vlist
+	self.alternates = {g:[v for v in vlist if v in s.glyphs]
 					   for g,vlist in self.alternates.items()
 					   if g in s.glyphs and
-					   all(v in s.glyphs for v in vlist)}
+					   any(v in s.glyphs for v in vlist)}
 	return bool(self.alternates)
 
 @_add_method(otTables.LigatureSubst)
 def closure_glyphs(self, s, cur_glyphs):
-	_set_update(s.glyphs, *([seq.LigGlyph for seq in seqs
-					      if all(c in s.glyphs for c in seq.Component)]
-				for g,seqs in self.ligatures.items()
-				if g in cur_glyphs))
+	s.glyphs.update(*([seq.LigGlyph for seq in seqs
+					if all(c in s.glyphs for c in seq.Component)]
+			  for g,seqs in self.ligatures.items()
+			  if g in cur_glyphs))
 
 @_add_method(otTables.LigatureSubst)
 def subset_glyphs(self, s):
@@ -501,11 +514,11 @@ def closure_glyphs(self, s, cur_glyphs):
 def subset_glyphs(self, s):
 	if self.Format == 1:
 		indices = self.Coverage.subset(s.glyphs)
-		self.Substitute = [self.Substitute[i] for i in indices]
+		self.Substitute = _list_subset(self.Substitute, indices)
 		# Now drop rules generating glyphs we don't want
 		indices = [i for i,sub in enumerate(self.Substitute)
 				 if sub in s.glyphs]
-		self.Substitute = [self.Substitute[i] for i in indices]
+		self.Substitute = _list_subset(self.Substitute, indices)
 		self.Coverage.remap(indices)
 		self.GlyphCount = len(self.Substitute)
 		return bool(self.GlyphCount and
@@ -548,7 +561,7 @@ def subset_glyphs(self, s):
 		# Remove empty pairsets
 		indices = [i for i,p in enumerate(self.PairSet) if p.PairValueCount]
 		self.Coverage.remap(indices)
-		self.PairSet = [self.PairSet[i] for i in indices]
+		self.PairSet = _list_subset(self.PairSet, indices)
 		self.PairSetCount = len(self.PairSet)
 		return bool(self.PairSetCount)
 	elif self.Format == 2:
@@ -603,10 +616,10 @@ def prune_post_subset(self, font, options):
 def subset_glyphs(self, s):
 	if self.Format == 1:
 		mark_indices = self.MarkCoverage.subset(s.glyphs)
-		self.MarkArray.MarkRecord = [self.MarkArray.MarkRecord[i] for i in mark_indices]
+		self.MarkArray.MarkRecord = _list_subset(self.MarkArray.MarkRecord, mark_indices)
 		self.MarkArray.MarkCount = len(self.MarkArray.MarkRecord)
 		base_indices = self.BaseCoverage.subset(s.glyphs)
-		self.BaseArray.BaseRecord = [self.BaseArray.BaseRecord[i] for i in base_indices]
+		self.BaseArray.BaseRecord = _list_subset(self.BaseArray.BaseRecord, base_indices)
 		self.BaseArray.BaseCount = len(self.BaseArray.BaseRecord)
 		# Prune empty classes
 		class_indices = _uniq_sort(v.Class for v in self.MarkArray.MarkRecord)
@@ -614,10 +627,10 @@ def subset_glyphs(self, s):
 		for m in self.MarkArray.MarkRecord:
 			m.Class = class_indices.index(m.Class)
 		for b in self.BaseArray.BaseRecord:
-			b.BaseAnchor = [b.BaseAnchor[i] for i in class_indices]
+			b.BaseAnchor = _list_subset(b.BaseAnchor, class_indices)
 		return bool(self.ClassCount and
-					self.MarkArray.MarkCount and
-					self.BaseArray.BaseCount)
+			    self.MarkArray.MarkCount and
+			    self.BaseArray.BaseCount)
 	else:
 		assert 0, "unknown format: %s" % self.Format
 
@@ -637,10 +650,10 @@ def prune_post_subset(self, font, options):
 def subset_glyphs(self, s):
 	if self.Format == 1:
 		mark_indices = self.MarkCoverage.subset(s.glyphs)
-		self.MarkArray.MarkRecord = [self.MarkArray.MarkRecord[i] for i in mark_indices]
+		self.MarkArray.MarkRecord = _list_subset(self.MarkArray.MarkRecord, mark_indices)
 		self.MarkArray.MarkCount = len(self.MarkArray.MarkRecord)
 		ligature_indices = self.LigatureCoverage.subset(s.glyphs)
-		self.LigatureArray.LigatureAttach = [self.LigatureArray.LigatureAttach[i] for i in ligature_indices]
+		self.LigatureArray.LigatureAttach = _list_subset(self.LigatureArray.LigatureAttach, ligature_indices)
 		self.LigatureArray.LigatureCount = len(self.LigatureArray.LigatureAttach)
 		# Prune empty classes
 		class_indices = _uniq_sort(v.Class for v in self.MarkArray.MarkRecord)
@@ -649,10 +662,10 @@ def subset_glyphs(self, s):
 			m.Class = class_indices.index(m.Class)
 		for l in self.LigatureArray.LigatureAttach:
 			for c in l.ComponentRecord:
-				c.LigatureAnchor = [c.LigatureAnchor[i] for i in class_indices]
+				c.LigatureAnchor = _list_subset(c.LigatureAnchor, class_indices)
 		return bool(self.ClassCount and
-					self.MarkArray.MarkCount and
-					self.LigatureArray.LigatureCount)
+			    self.MarkArray.MarkCount and
+			    self.LigatureArray.LigatureCount)
 	else:
 		assert 0, "unknown format: %s" % self.Format
 
@@ -673,10 +686,10 @@ def prune_post_subset(self, font, options):
 def subset_glyphs(self, s):
 	if self.Format == 1:
 		mark1_indices = self.Mark1Coverage.subset(s.glyphs)
-		self.Mark1Array.MarkRecord = [self.Mark1Array.MarkRecord[i] for i in mark1_indices]
+		self.Mark1Array.MarkRecord = _list_subset(self.Mark1Array.MarkRecord, mark1_indices)
 		self.Mark1Array.MarkCount = len(self.Mark1Array.MarkRecord)
 		mark2_indices = self.Mark2Coverage.subset(s.glyphs)
-		self.Mark2Array.Mark2Record = [self.Mark2Array.Mark2Record[i] for i in mark2_indices]
+		self.Mark2Array.Mark2Record = _list_subset(self.Mark2Array.Mark2Record, mark2_indices)
 		self.Mark2Array.MarkCount = len(self.Mark2Array.Mark2Record)
 		# Prune empty classes
 		class_indices = _uniq_sort(v.Class for v in self.Mark1Array.MarkRecord)
@@ -684,10 +697,10 @@ def subset_glyphs(self, s):
 		for m in self.Mark1Array.MarkRecord:
 			m.Class = class_indices.index(m.Class)
 		for b in self.Mark2Array.Mark2Record:
-			b.Mark2Anchor = [b.Mark2Anchor[i] for i in class_indices]
+			b.Mark2Anchor = _list_subset(b.Mark2Anchor, class_indices)
 		return bool(self.ClassCount and
-					self.Mark1Array.MarkCount and
-					self.Mark2Array.MarkCount)
+			    self.Mark1Array.MarkCount and
+			    self.Mark2Array.MarkCount)
 	else:
 		assert 0, "unknown format: %s" % self.Format
 
@@ -1001,7 +1014,7 @@ def subset_glyphs(self, s):
 		# Prune empty rulesets
 		indices = [i for i,rs in enumerate(rss) if rs and getattr(rs, c.Rule)]
 		self.Coverage.remap(indices)
-		rss = [rss[i] for i in indices]
+		rss = _list_subset(rss, indices)
 		setattr(self, c.RuleSet, rss)
 		setattr(self, c.RuleSetCount, len(rss))
 		return bool(rss)
@@ -1151,18 +1164,18 @@ def closure_glyphs(self, s, cur_glyphs=None):
 		cur_glyphs = frozenset(s.glyphs)
 
 	# Memoize
-	if (id(self), cur_glyphs) in s._doneLookups:
+	key = id(self)
+	doneLookups = s._doneLookups
+	count,covered = doneLookups.get(key, (0, None))
+	if count != len(s.glyphs):
+		count,covered = doneLookups[key] = (len(s.glyphs), set())
+	if cur_glyphs.issubset(covered):
 		return
-	s._doneLookups.add((id(self), cur_glyphs))
+	covered.update(cur_glyphs)
 
-	if self in s._activeLookups:
-		raise Exception("Circular loop in lookup recursion")
-	s._activeLookups.append(self)
 	for st in self.SubTable:
 		if not st: continue
 		st.closure_glyphs(s, cur_glyphs)
-	assert(s._activeLookups[-1] == self)
-	del s._activeLookups[-1]
 
 @_add_method(otTables.Lookup)
 def subset_glyphs(self, s):
@@ -1266,7 +1279,7 @@ def collect_lookups(self, feature_indices):
 @_add_method(otTables.FeatureList)
 def subset_features(self, feature_indices):
 	self.ensureDecompiled()
-	self.FeatureRecord = [self.FeatureRecord[i] for i in feature_indices]
+	self.FeatureRecord = _list_subset(self.FeatureRecord, feature_indices)
 	self.FeatureCount = len(self.FeatureRecord)
 	return bool(self.FeatureCount)
 
@@ -1370,12 +1383,24 @@ def subset_glyphs(self, s):
 
 	return True
 
-# CBDC will inherit it
+# CBDT will inherit it
 @_add_method(ttLib.getTableClass('EBDT'))
 def subset_glyphs(self, s):
-  self.strikeData = [{g: strike[g] for g in s.glyphs if g in strike}
-					 for strike in self.strikeData]
-  return True
+	strikeData = [
+		{g: strike[g] for g in s.glyphs if g in strike}
+		for strike in self.strikeData
+	]
+	# Prune empty strikes
+	# https://github.com/fonttools/fonttools/issues/1633
+	self.strikeData = [strike for strike in strikeData if strike]
+	return True
+
+@_add_method(ttLib.getTableClass('sbix'))
+def subset_glyphs(self, s):
+	for strike in self.strikes.values():
+		strike.glyphs = {g: strike.glyphs[g] for g in s.glyphs if g in strike.glyphs}
+
+	return True
 
 @_add_method(ttLib.getTableClass('GSUB'))
 def closure_glyphs(self, s):
@@ -1392,21 +1417,20 @@ def closure_glyphs(self, s):
 		lookup_indices += self.table.FeatureVariations.collect_lookups(feature_indices)
 	lookup_indices = _uniq_sort(lookup_indices)
 	if self.table.LookupList:
+		s._doneLookups = {}
 		while True:
 			orig_glyphs = frozenset(s.glyphs)
-			s._activeLookups = []
-			s._doneLookups = set()
 			for i in lookup_indices:
 				if i >= self.table.LookupList.LookupCount: continue
 				if not self.table.LookupList.Lookup[i]: continue
 				self.table.LookupList.Lookup[i].closure_glyphs(s)
-			del s._activeLookups, s._doneLookups
 			if orig_glyphs == s.glyphs:
 				break
+		del s._doneLookups
 	del s.table
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def subset_glyphs(self, s):
 	s.glyphs = s.glyphs_gsubed
 	if self.table.LookupList:
@@ -1417,14 +1441,14 @@ def subset_glyphs(self, s):
 	return True
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def retain_empty_scripts(self):
-	# https://github.com/behdad/fonttools/issues/518
+	# https://github.com/fonttools/fonttools/issues/518
 	# https://bugzilla.mozilla.org/show_bug.cgi?id=1080739#c15
 	return self.__class__ == ttLib.getTableClass('GSUB')
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def subset_lookups(self, lookup_indices):
 	"""Retains specified lookups, then removes empty features, language
 	systems, and scripts."""
@@ -1445,14 +1469,14 @@ def subset_lookups(self, lookup_indices):
 		self.table.ScriptList.subset_features(feature_indices, self.retain_empty_scripts())
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def neuter_lookups(self, lookup_indices):
 	"""Sets lookups not in lookup_indices to None."""
 	if self.table.LookupList:
 		self.table.LookupList.neuter_lookups(lookup_indices)
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def prune_lookups(self, remap=True):
 	"""Remove (default) or neuter unreferenced lookups"""
 	if self.table.ScriptList:
@@ -1476,7 +1500,7 @@ def prune_lookups(self, remap=True):
 		self.neuter_lookups(lookup_indices)
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def subset_feature_tags(self, feature_tags):
 	if self.table.FeatureList:
 		feature_indices = \
@@ -1489,6 +1513,15 @@ def subset_feature_tags(self, feature_tags):
 		feature_indices = []
 	if self.table.ScriptList:
 		self.table.ScriptList.subset_features(feature_indices, self.retain_empty_scripts())
+
+@_add_method(ttLib.getTableClass('GSUB'),
+	     ttLib.getTableClass('GPOS'))
+def subset_script_tags(self, script_tags):
+	if self.table.ScriptList:
+		self.table.ScriptList.ScriptRecord = \
+			[s for s in self.table.ScriptList.ScriptRecord
+			 if s.ScriptTag in script_tags]
+		self.table.ScriptList.ScriptCount = len(self.table.ScriptList.ScriptRecord)
 
 @_add_method(ttLib.getTableClass('GSUB'),
 			 ttLib.getTableClass('GPOS'))
@@ -1506,9 +1539,11 @@ def prune_features(self):
 		self.table.ScriptList.subset_features(feature_indices, self.retain_empty_scripts())
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def prune_pre_subset(self, font, options):
 	# Drop undesired features
+	if '*' not in options.layout_scripts:
+		self.subset_script_tags(options.layout_scripts)
 	if '*' not in options.layout_features:
 		self.subset_feature_tags(options.layout_features)
 	# Neuter unreferenced lookups
@@ -1516,7 +1551,7 @@ def prune_pre_subset(self, font, options):
 	return True
 
 @_add_method(ttLib.getTableClass('GSUB'),
-			 ttLib.getTableClass('GPOS'))
+	     ttLib.getTableClass('GPOS'))
 def remove_redundant_langsys(self):
 	table = self.table
 	if not table.ScriptList or not table.FeatureList:
@@ -1597,7 +1632,7 @@ def subset_glyphs(self, s):
 	table = self.table
 	if table.LigCaretList:
 		indices = table.LigCaretList.Coverage.subset(glyphs)
-		table.LigCaretList.LigGlyph = [table.LigCaretList.LigGlyph[i] for i in indices]
+		table.LigCaretList.LigGlyph = _list_subset(table.LigCaretList.LigGlyph, indices)
 		table.LigCaretList.LigGlyphCount = len(table.LigCaretList.LigGlyph)
 	if table.MarkAttachClassDef:
 		table.MarkAttachClassDef.classDefs = \
@@ -1615,11 +1650,16 @@ def subset_glyphs(self, s):
 		table.AttachList.GlyphCount = len(table.AttachList.AttachPoint)
 	if hasattr(table, "MarkGlyphSetsDef") and table.MarkGlyphSetsDef:
 		for coverage in table.MarkGlyphSetsDef.Coverage:
-			coverage.subset(glyphs)
+			if coverage:
+				coverage.subset(glyphs)
+
 		# TODO: The following is disabled. If enabling, we need to go fixup all
 		# lookups that use MarkFilteringSet and map their set.
 		# indices = table.MarkGlyphSetsDef.Coverage = \
 		#   [c for c in table.MarkGlyphSetsDef.Coverage if c.glyphs]
+		# TODO: The following is disabled, as ots doesn't like it. Phew...
+		# https://github.com/khaledhosny/ots/issues/172
+		# table.MarkGlyphSetsDef.Coverage = [c if c.glyphs else None for c in table.MarkGlyphSetsDef.Coverage]
 	return True
 
 
@@ -1635,8 +1675,6 @@ def _pruneGDEF(font):
 
 	# Collect.
 	table.collect_device_varidxes(usedVarIdxes)
-	if 'GSUB' in font:
-		font['GSUB'].table.collect_device_varidxes(usedVarIdxes)
 	if 'GPOS' in font:
 		font['GPOS'].table.collect_device_varidxes(usedVarIdxes)
 
@@ -1675,7 +1713,8 @@ def prune_post_subset(self, font, options):
 		    table.MarkAttachClassDef or
 		    table.GlyphClassDef or
 		    table.AttachList or
-		    (table.Version >= 0x00010002 and table.MarkGlyphSetsDef))
+		    (table.Version >= 0x00010002 and table.MarkGlyphSetsDef) or
+		    (table.Version >= 0x00010003 and table.VarStore))
 
 @_add_method(ttLib.getTableClass('kern'))
 def prune_pre_subset(self, font, options):
@@ -1695,16 +1734,23 @@ def subset_glyphs(self, s):
 @_add_method(ttLib.getTableClass('vmtx'))
 def subset_glyphs(self, s):
 	self.metrics = _dict_subset(self.metrics, s.glyphs)
+	for g in s.glyphs_emptied:
+		self.metrics[g] = (0,0)
 	return bool(self.metrics)
 
 @_add_method(ttLib.getTableClass('hmtx'))
 def subset_glyphs(self, s):
 	self.metrics = _dict_subset(self.metrics, s.glyphs)
+	for g in s.glyphs_emptied:
+		self.metrics[g] = (0,0)
 	return True # Required table
 
 @_add_method(ttLib.getTableClass('hdmx'))
 def subset_glyphs(self, s):
 	self.hdmx = {sz:_dict_subset(l, s.glyphs) for sz,l in self.hdmx.items()}
+	for sz in self.hdmx:
+		for g in s.glyphs_emptied:
+			self.hdmx[sz][g] = 0
 	return bool(self.hdmx)
 
 @_add_method(ttLib.getTableClass('ankr'))
@@ -1761,21 +1807,31 @@ def subset_glyphs(self, s):
 	self.glyphCount = len(self.variations)
 	return bool(self.variations)
 
+def _remap_index_map(s, varidx_map, table_map):
+	map_ = {k:varidx_map[v] for k,v in table_map.mapping.items()}
+	# Emptied glyphs are remapped to:
+	# if GID <= last retained GID, 0/0: delta set for 0/0 is expected to exist & zeros compress well
+	# if GID > last retained GID, major/minor of the last retained glyph: will be optimized out by table compiler
+	last_idx = varidx_map[table_map.mapping[s.last_retained_glyph]]
+	for g,i in s.reverseEmptiedGlyphMap.items():
+		map_[g] = last_idx if i > s.last_retained_order else 0
+	return map_
+
 @_add_method(ttLib.getTableClass('HVAR'))
 def subset_glyphs(self, s):
 	table = self.table
 
-	# TODO Handle direct mapping
-	assert table.AdvWidthMap, "File a bug."
-
 	used = set()
+	advIdxes_ = set()
+	retainAdvMap = False
 
 	if table.AdvWidthMap:
 		table.AdvWidthMap.mapping = _dict_subset(table.AdvWidthMap.mapping, s.glyphs)
 		used.update(table.AdvWidthMap.mapping.values())
 	else:
-		assert table.LsbMap is None and table.RsbMap is None, "File a bug."
 		used.update(s.reverseOrigGlyphMap.values())
+		advIdxes_ = used.copy()
+		retainAdvMap = s.options.retain_gids
 
 	if table.LsbMap:
 		table.LsbMap.mapping = _dict_subset(table.LsbMap.mapping, s.glyphs)
@@ -1784,14 +1840,14 @@ def subset_glyphs(self, s):
 		table.RsbMap.mapping = _dict_subset(table.RsbMap.mapping, s.glyphs)
 		used.update(table.RsbMap.mapping.values())
 
-	varidx_map = varStore.VarStore_subset_varidxes(table.VarStore, used)
+	varidx_map = varStore.VarStore_subset_varidxes(table.VarStore, used, retainFirstMap=retainAdvMap, advIdxes=advIdxes_)
 
 	if table.AdvWidthMap:
-		table.AdvWidthMap.mapping = {k:varidx_map[v] for k,v in table.AdvWidthMap.mapping.items()}
+		table.AdvWidthMap.mapping = _remap_index_map(s, varidx_map, table.AdvWidthMap)
 	if table.LsbMap:
-		table.LsbMap.mapping = {k:varidx_map[v] for k,v in table.LsbMap.mapping.items()}
+		table.LsbMap.mapping = _remap_index_map(s, varidx_map, table.LsbMap)
 	if table.RsbMap:
-		table.RsbMap.mapping = {k:varidx_map[v] for k,v in table.RsbMap.mapping.items()}
+		table.RsbMap.mapping = _remap_index_map(s, varidx_map, table.RsbMap)
 
 	# TODO Return emptiness...
 	return True
@@ -1801,13 +1857,17 @@ def subset_glyphs(self, s):
 	table = self.table
 
 	used = set()
+	advIdxes_ = set()
+	retainAdvMap = False
 
 	if table.AdvHeightMap:
 		table.AdvHeightMap.mapping = _dict_subset(table.AdvHeightMap.mapping, s.glyphs)
 		used.update(table.AdvHeightMap.mapping.values())
 	else:
-		assert table.TsbMap is None and table.BsbMap is None and table.VOrgMap is None, "File a bug."
 		used.update(s.reverseOrigGlyphMap.values())
+		advIdxes_ = used.copy()
+		retainAdvMap = s.options.retain_gids
+
 	if table.TsbMap:
 		table.TsbMap.mapping = _dict_subset(table.TsbMap.mapping, s.glyphs)
 		used.update(table.TsbMap.mapping.values())
@@ -1818,16 +1878,16 @@ def subset_glyphs(self, s):
 		table.VOrgMap.mapping = _dict_subset(table.VOrgMap.mapping, s.glyphs)
 		used.update(table.VOrgMap.mapping.values())
 
-	varidx_map = varStore.VarStore_subset_varidxes(table.VarStore, used)
+	varidx_map = varStore.VarStore_subset_varidxes(table.VarStore, used, retainFirstMap=retainAdvMap, advIdxes=advIdxes_)
 
 	if table.AdvHeightMap:
-		table.AdvHeightMap.mapping = {k:varidx_map[v] for k,v in table.AdvHeightMap.mapping.items()}
+		table.AdvHeightMap.mapping = _remap_index_map(s, varidx_map, table.AdvHeightMap)
 	if table.TsbMap:
-		table.TsbMap.mapping = {k:varidx_map[v] for k,v in table.TsbMap.mapping.items()}
+		table.TsbMap.mapping = _remap_index_map(s, varidx_map, table.TsbMap)
 	if table.BsbMap:
-		table.RsbMap.mapping = {k:varidx_map[v] for k,v in table.RsbMap.mapping.items()}
+		table.BsbMap.mapping = _remap_index_map(s, varidx_map, table.BsbMap)
 	if table.VOrgMap:
-		table.RsbMap.mapping = {k:varidx_map[v] for k,v in table.RsbMap.mapping.items()}
+		table.VOrgMap.mapping = _remap_index_map(s, varidx_map, table.VOrgMap)
 
 	# TODO Return emptiness...
 	return True
@@ -1937,26 +1997,27 @@ def closure_glyphs(self, s):
 
 @_add_method(ttLib.getTableClass('MATH'))
 def closure_glyphs(self, s):
-	self.table.MathVariants.closure_glyphs(s)
+	if self.table.MathVariants:
+		self.table.MathVariants.closure_glyphs(s)
 
 @_add_method(otTables.MathItalicsCorrectionInfo)
 def subset_glyphs(self, s):
 	indices = self.Coverage.subset(s.glyphs)
-	self.ItalicsCorrection = [self.ItalicsCorrection[i] for i in indices]
+	self.ItalicsCorrection = _list_subset(self.ItalicsCorrection, indices)
 	self.ItalicsCorrectionCount = len(self.ItalicsCorrection)
 	return bool(self.ItalicsCorrectionCount)
 
 @_add_method(otTables.MathTopAccentAttachment)
 def subset_glyphs(self, s):
 	indices = self.TopAccentCoverage.subset(s.glyphs)
-	self.TopAccentAttachment = [self.TopAccentAttachment[i] for i in indices]
+	self.TopAccentAttachment = _list_subset(self.TopAccentAttachment, indices)
 	self.TopAccentAttachmentCount = len(self.TopAccentAttachment)
 	return bool(self.TopAccentAttachmentCount)
 
 @_add_method(otTables.MathKernInfo)
 def subset_glyphs(self, s):
 	indices = self.MathKernCoverage.subset(s.glyphs)
-	self.MathKernInfoRecords = [self.MathKernInfoRecords[i] for i in indices]
+	self.MathKernInfoRecords = _list_subset(self.MathKernInfoRecords, indices)
 	self.MathKernCount = len(self.MathKernInfoRecords)
 	return bool(self.MathKernCount)
 
@@ -1976,12 +2037,12 @@ def subset_glyphs(self, s):
 def subset_glyphs(self, s):
 	if self.VertGlyphCoverage:
 		indices = self.VertGlyphCoverage.subset(s.glyphs)
-		self.VertGlyphConstruction = [self.VertGlyphConstruction[i] for i in indices]
+		self.VertGlyphConstruction = _list_subset(self.VertGlyphConstruction, indices)
 		self.VertGlyphCount = len(self.VertGlyphConstruction)
 
 	if self.HorizGlyphCoverage:
 		indices = self.HorizGlyphCoverage.subset(s.glyphs)
-		self.HorizGlyphConstruction = [self.HorizGlyphConstruction[i] for i in indices]
+		self.HorizGlyphConstruction = _list_subset(self.HorizGlyphConstruction, indices)
 		self.HorizGlyphCount = len(self.HorizGlyphConstruction)
 
 	return True
@@ -1989,12 +2050,14 @@ def subset_glyphs(self, s):
 @_add_method(ttLib.getTableClass('MATH'))
 def subset_glyphs(self, s):
 	s.glyphs = s.glyphs_mathed
-	self.table.MathGlyphInfo.subset_glyphs(s)
-	self.table.MathVariants.subset_glyphs(s)
+	if self.table.MathGlyphInfo:
+		self.table.MathGlyphInfo.subset_glyphs(s)
+	if self.table.MathVariants:
+		self.table.MathVariants.subset_glyphs(s)
 	return True
 
 @_add_method(ttLib.getTableModule('glyf').Glyph)
-def remapComponentsFast(self, indices):
+def remapComponentsFast(self, glyphidmap):
 	if not self.data or struct.unpack(">h", self.data[:2])[0] >= 0:
 		return	# Not composite
 	data = array.array("B", self.data)
@@ -2004,7 +2067,7 @@ def remapComponentsFast(self, indices):
 		flags =(data[i] << 8) | data[i+1]
 		glyphID =(data[i+2] << 8) | data[i+3]
 		# Remap
-		glyphID = indices.index(glyphID)
+		glyphID = glyphidmap[glyphID]
 		data[i+2] = glyphID >> 8
 		data[i+3] = glyphID & 0xFF
 		i += 4
@@ -2017,7 +2080,7 @@ def remapComponentsFast(self, indices):
 		elif flags & 0x0080: i += 8	# WE_HAVE_A_TWO_BY_TWO
 		more = flags & 0x0020	# MORE_COMPONENTS
 
-	self.data = data.tostring()
+	self.data = data.tobytes()
 
 @_add_method(ttLib.getTableClass('glyf'))
 def closure_glyphs(self, s):
@@ -2047,13 +2110,17 @@ def prune_pre_subset(self, font, options):
 @_add_method(ttLib.getTableClass('glyf'))
 def subset_glyphs(self, s):
 	self.glyphs = _dict_subset(self.glyphs, s.glyphs)
-	indices = [i for i,g in enumerate(self.glyphOrder) if g in s.glyphs]
-	for v in self.glyphs.values():
-		if hasattr(v, "data"):
-			v.remapComponentsFast(indices)
-		else:
-			pass	# No need
-	self.glyphOrder = [g for g in self.glyphOrder if g in s.glyphs]
+	if not s.options.retain_gids:
+		indices = [i for i,g in enumerate(self.glyphOrder) if g in s.glyphs]
+		glyphmap = {o:n for n,o in enumerate(indices)}
+		for v in self.glyphs.values():
+			if hasattr(v, "data"):
+				v.remapComponentsFast(glyphmap)
+	Glyph = ttLib.getTableModule('glyf').Glyph
+	for g in s.glyphs_emptied:
+		self.glyphs[g] = Glyph()
+		self.glyphs[g].data = ''
+	self.glyphOrder = [g for g in self.glyphOrder if g in s.glyphs or g in s.glyphs_emptied]
 	# Don't drop empty 'glyf' tables, otherwise 'loca' doesn't get subset.
 	return True
 
@@ -2063,516 +2130,6 @@ def prune_post_subset(self, font, options):
 	for v in self.glyphs.values():
 		v.trim(remove_hinting=remove_hinting)
 	return True
-
-
-class _ClosureGlyphsT2Decompiler(psCharStrings.SimpleT2Decompiler):
-
-	def __init__(self, components, localSubrs, globalSubrs):
-		psCharStrings.SimpleT2Decompiler.__init__(self,
-							  localSubrs,
-							  globalSubrs)
-		self.components = components
-
-	def op_endchar(self, index):
-		args = self.popall()
-		if len(args) >= 4:
-			from fontTools.encodings.StandardEncoding import StandardEncoding
-			# endchar can do seac accent bulding; The T2 spec says it's deprecated,
-			# but recent software that shall remain nameless does output it.
-			adx, ady, bchar, achar = args[-4:]
-			baseGlyph = StandardEncoding[bchar]
-			accentGlyph = StandardEncoding[achar]
-			self.components.add(baseGlyph)
-			self.components.add(accentGlyph)
-
-@_add_method(ttLib.getTableClass('CFF '))
-def closure_glyphs(self, s):
-	cff = self.cff
-	assert len(cff) == 1
-	font = cff[cff.keys()[0]]
-	glyphSet = font.CharStrings
-
-	decompose = s.glyphs
-	while decompose:
-		components = set()
-		for g in decompose:
-			if g not in glyphSet:
-				continue
-			gl = glyphSet[g]
-
-			subrs = getattr(gl.private, "Subrs", [])
-			decompiler = _ClosureGlyphsT2Decompiler(components, subrs, gl.globalSubrs)
-			decompiler.execute(gl)
-		components -= s.glyphs
-		s.glyphs.update(components)
-		decompose = components
-
-@_add_method(ttLib.getTableClass('CFF '))
-def prune_pre_subset(self, font, options):
-	cff = self.cff
-	# CFF table must have one font only
-	cff.fontNames = cff.fontNames[:1]
-
-	if options.notdef_glyph and not options.notdef_outline:
-		for fontname in cff.keys():
-			font = cff[fontname]
-			c, fdSelectIndex = font.CharStrings.getItemAndSelector('.notdef')
-			if hasattr(font, 'FDArray') and font.FDArray is not None:
-				private = font.FDArray[fdSelectIndex].Private
-			else:
-				private = font.Private
-			dfltWdX = private.defaultWidthX
-			nmnlWdX = private.nominalWidthX
-			pen = NullPen()
-			c.draw(pen)  # this will set the charstring's width
-			if c.width != dfltWdX:
-				c.program = [c.width - nmnlWdX, 'endchar']
-			else:
-				c.program = ['endchar']
-
-	# Clear useless Encoding
-	for fontname in cff.keys():
-		font = cff[fontname]
-		# https://github.com/behdad/fonttools/issues/620
-		font.Encoding = "StandardEncoding"
-
-	return True # bool(cff.fontNames)
-
-@_add_method(ttLib.getTableClass('CFF '))
-def subset_glyphs(self, s):
-	cff = self.cff
-	for fontname in cff.keys():
-		font = cff[fontname]
-		cs = font.CharStrings
-
-		# Load all glyphs
-		for g in font.charset:
-			if g not in s.glyphs: continue
-			c, _ = cs.getItemAndSelector(g)
-
-		if cs.charStringsAreIndexed:
-			indices = [i for i,g in enumerate(font.charset) if g in s.glyphs]
-			csi = cs.charStringsIndex
-			csi.items = [csi.items[i] for i in indices]
-			del csi.file, csi.offsets
-			if hasattr(font, "FDSelect"):
-				sel = font.FDSelect
-				# XXX We want to set sel.format to None, such that the
-				# most compact format is selected. However, OTS was
-				# broken and couldn't parse a FDSelect format 0 that
-				# happened before CharStrings. As such, always force
-				# format 3 until we fix cffLib to always generate
-				# FDSelect after CharStrings.
-				# https://github.com/khaledhosny/ots/pull/31
-				#sel.format = None
-				sel.format = 3
-				sel.gidArray = [sel.gidArray[i] for i in indices]
-			cs.charStrings = {g:indices.index(v)
-					  for g,v in cs.charStrings.items()
-					  if g in s.glyphs}
-		else:
-			cs.charStrings = {g:v
-					  for g,v in cs.charStrings.items()
-					  if g in s.glyphs}
-		font.charset = [g for g in font.charset if g in s.glyphs]
-		font.numGlyphs = len(font.charset)
-
-	return True # any(cff[fontname].numGlyphs for fontname in cff.keys())
-
-@_add_method(psCharStrings.T2CharString)
-def subset_subroutines(self, subrs, gsubrs):
-	p = self.program
-	assert len(p)
-	for i in range(1, len(p)):
-		if p[i] == 'callsubr':
-			assert isinstance(p[i-1], int)
-			p[i-1] = subrs._used.index(p[i-1] + subrs._old_bias) - subrs._new_bias
-		elif p[i] == 'callgsubr':
-			assert isinstance(p[i-1], int)
-			p[i-1] = gsubrs._used.index(p[i-1] + gsubrs._old_bias) - gsubrs._new_bias
-
-@_add_method(psCharStrings.T2CharString)
-def drop_hints(self):
-	hints = self._hints
-
-	if hints.deletions:
-		p = self.program
-		for idx in reversed(hints.deletions):
-			del p[idx-2:idx]
-
-	if hints.has_hint:
-		assert not hints.deletions or hints.last_hint <= hints.deletions[0]
-		self.program = self.program[hints.last_hint:]
-		if hasattr(self, 'width'):
-			# Insert width back if needed
-			if self.width != self.private.defaultWidthX:
-				self.program.insert(0, self.width - self.private.nominalWidthX)
-
-	if hints.has_hintmask:
-		i = 0
-		p = self.program
-		while i < len(p):
-			if p[i] in ['hintmask', 'cntrmask']:
-				assert i + 1 <= len(p)
-				del p[i:i+2]
-				continue
-			i += 1
-
-	assert len(self.program)
-
-	del self._hints
-
-class _MarkingT2Decompiler(psCharStrings.SimpleT2Decompiler):
-
-	def __init__(self, localSubrs, globalSubrs):
-		psCharStrings.SimpleT2Decompiler.__init__(self,
-							  localSubrs,
-							  globalSubrs)
-		for subrs in [localSubrs, globalSubrs]:
-			if subrs and not hasattr(subrs, "_used"):
-				subrs._used = set()
-
-	def op_callsubr(self, index):
-		self.localSubrs._used.add(self.operandStack[-1]+self.localBias)
-		psCharStrings.SimpleT2Decompiler.op_callsubr(self, index)
-
-	def op_callgsubr(self, index):
-		self.globalSubrs._used.add(self.operandStack[-1]+self.globalBias)
-		psCharStrings.SimpleT2Decompiler.op_callgsubr(self, index)
-
-class _DehintingT2Decompiler(psCharStrings.T2WidthExtractor):
-
-	class Hints(object):
-		def __init__(self):
-			# Whether calling this charstring produces any hint stems
-			# Note that if a charstring starts with hintmask, it will
-			# have has_hint set to True, because it *might* produce an
-			# implicit vstem if called under certain conditions.
-			self.has_hint = False
-			# Index to start at to drop all hints
-			self.last_hint = 0
-			# Index up to which we know more hints are possible.
-			# Only relevant if status is 0 or 1.
-			self.last_checked = 0
-			# The status means:
-			# 0: after dropping hints, this charstring is empty
-			# 1: after dropping hints, there may be more hints
-			#	continuing after this
-			# 2: no more hints possible after this charstring
-			self.status = 0
-			# Has hintmask instructions; not recursive
-			self.has_hintmask = False
-			# List of indices of calls to empty subroutines to remove.
-			self.deletions = []
-		pass
-
-	def __init__(self, css, localSubrs, globalSubrs, nominalWidthX, defaultWidthX):
-		self._css = css
-		psCharStrings.T2WidthExtractor.__init__(
-			self, localSubrs, globalSubrs, nominalWidthX, defaultWidthX)
-
-	def execute(self, charString):
-		old_hints = charString._hints if hasattr(charString, '_hints') else None
-		charString._hints = self.Hints()
-
-		psCharStrings.T2WidthExtractor.execute(self, charString)
-
-		hints = charString._hints
-
-		if hints.has_hint or hints.has_hintmask:
-			self._css.add(charString)
-
-		if hints.status != 2:
-			# Check from last_check, make sure we didn't have any operators.
-			for i in range(hints.last_checked, len(charString.program) - 1):
-				if isinstance(charString.program[i], str):
-					hints.status = 2
-					break
-				else:
-					hints.status = 1 # There's *something* here
-			hints.last_checked = len(charString.program)
-
-		if old_hints:
-			assert hints.__dict__ == old_hints.__dict__
-
-	def op_callsubr(self, index):
-		subr = self.localSubrs[self.operandStack[-1]+self.localBias]
-		psCharStrings.T2WidthExtractor.op_callsubr(self, index)
-		self.processSubr(index, subr)
-
-	def op_callgsubr(self, index):
-		subr = self.globalSubrs[self.operandStack[-1]+self.globalBias]
-		psCharStrings.T2WidthExtractor.op_callgsubr(self, index)
-		self.processSubr(index, subr)
-
-	def op_hstem(self, index):
-		psCharStrings.T2WidthExtractor.op_hstem(self, index)
-		self.processHint(index)
-	def op_vstem(self, index):
-		psCharStrings.T2WidthExtractor.op_vstem(self, index)
-		self.processHint(index)
-	def op_hstemhm(self, index):
-		psCharStrings.T2WidthExtractor.op_hstemhm(self, index)
-		self.processHint(index)
-	def op_vstemhm(self, index):
-		psCharStrings.T2WidthExtractor.op_vstemhm(self, index)
-		self.processHint(index)
-	def op_hintmask(self, index):
-		rv = psCharStrings.T2WidthExtractor.op_hintmask(self, index)
-		self.processHintmask(index)
-		return rv
-	def op_cntrmask(self, index):
-		rv = psCharStrings.T2WidthExtractor.op_cntrmask(self, index)
-		self.processHintmask(index)
-		return rv
-
-	def processHintmask(self, index):
-		cs = self.callingStack[-1]
-		hints = cs._hints
-		hints.has_hintmask = True
-		if hints.status != 2:
-			# Check from last_check, see if we may be an implicit vstem
-			for i in range(hints.last_checked, index - 1):
-				if isinstance(cs.program[i], str):
-					hints.status = 2
-					break
-			else:
-				# We are an implicit vstem
-				hints.has_hint = True
-				hints.last_hint = index + 1
-				hints.status = 0
-		hints.last_checked = index + 1
-
-	def processHint(self, index):
-		cs = self.callingStack[-1]
-		hints = cs._hints
-		hints.has_hint = True
-		hints.last_hint = index
-		hints.last_checked = index
-
-	def processSubr(self, index, subr):
-		cs = self.callingStack[-1]
-		hints = cs._hints
-		subr_hints = subr._hints
-
-		# Check from last_check, make sure we didn't have
-		# any operators.
-		if hints.status != 2:
-			for i in range(hints.last_checked, index - 1):
-				if isinstance(cs.program[i], str):
-					hints.status = 2
-					break
-			hints.last_checked = index
-
-		if hints.status != 2:
-			if subr_hints.has_hint:
-				hints.has_hint = True
-
-			# Decide where to chop off from
-			if subr_hints.status == 0:
-				hints.last_hint = index
-			else:
-				hints.last_hint = index - 2 # Leave the subr call in
-		elif subr_hints.status == 0:
-			hints.deletions.append(index)
-
-		hints.status = max(hints.status, subr_hints.status)
-
-class _DesubroutinizingT2Decompiler(psCharStrings.SimpleT2Decompiler):
-
-	def __init__(self, localSubrs, globalSubrs):
-		psCharStrings.SimpleT2Decompiler.__init__(self,
-							  localSubrs,
-							  globalSubrs)
-
-	def execute(self, charString):
-		# Note: Currently we recompute _desubroutinized each time.
-		# This is more robust in some cases, but in other places we assume
-		# that each subroutine always expands to the same code, so
-		# maybe it doesn't matter. To speed up we can just not
-		# recompute _desubroutinized if it's there. For now I just
-		# double-check that it desubroutinized to the same thing.
-		old_desubroutinized = charString._desubroutinized if hasattr(charString, '_desubroutinized') else None
-
-		charString._patches = []
-		psCharStrings.SimpleT2Decompiler.execute(self, charString)
-		desubroutinized = charString.program[:]
-		for idx,expansion in reversed (charString._patches):
-			assert idx >= 2
-			assert desubroutinized[idx - 1] in ['callsubr', 'callgsubr'], desubroutinized[idx - 1]
-			assert type(desubroutinized[idx - 2]) == int
-			if expansion[-1] == 'return':
-				expansion = expansion[:-1]
-			desubroutinized[idx-2:idx] = expansion
-		if 'endchar' in desubroutinized:
-			# Cut off after first endchar
-			desubroutinized = desubroutinized[:desubroutinized.index('endchar') + 1]
-		else:
-			if not len(desubroutinized) or desubroutinized[-1] != 'return':
-				desubroutinized.append('return')
-
-		charString._desubroutinized = desubroutinized
-		del charString._patches
-
-		if old_desubroutinized:
-			assert desubroutinized == old_desubroutinized
-
-	def op_callsubr(self, index):
-		subr = self.localSubrs[self.operandStack[-1]+self.localBias]
-		psCharStrings.SimpleT2Decompiler.op_callsubr(self, index)
-		self.processSubr(index, subr)
-
-	def op_callgsubr(self, index):
-		subr = self.globalSubrs[self.operandStack[-1]+self.globalBias]
-		psCharStrings.SimpleT2Decompiler.op_callgsubr(self, index)
-		self.processSubr(index, subr)
-
-	def processSubr(self, index, subr):
-		cs = self.callingStack[-1]
-		cs._patches.append((index, subr._desubroutinized))
-
-
-@_add_method(ttLib.getTableClass('CFF '))
-def prune_post_subset(self, font, options):
-	cff = self.cff
-	for fontname in cff.keys():
-		font = cff[fontname]
-		cs = font.CharStrings
-
-		# Drop unused FontDictionaries
-		if hasattr(font, "FDSelect"):
-			sel = font.FDSelect
-			indices = _uniq_sort(sel.gidArray)
-			sel.gidArray = [indices.index (ss) for ss in sel.gidArray]
-			arr = font.FDArray
-			arr.items = [arr[i] for i in indices]
-			del arr.file, arr.offsets
-
-		# Desubroutinize if asked for
-		if options.desubroutinize:
-			for g in font.charset:
-				c, _ = cs.getItemAndSelector(g)
-				c.decompile()
-				subrs = getattr(c.private, "Subrs", [])
-				decompiler = _DesubroutinizingT2Decompiler(subrs, c.globalSubrs)
-				decompiler.execute(c)
-				c.program = c._desubroutinized
-
-		# Drop hints if not needed
-		if not options.hinting:
-
-			# This can be tricky, but doesn't have to. What we do is:
-			#
-			# - Run all used glyph charstrings and recurse into subroutines,
-			# - For each charstring (including subroutines), if it has any
-			#   of the hint stem operators, we mark it as such.
-			#   Upon returning, for each charstring we note all the
-			#   subroutine calls it makes that (recursively) contain a stem,
-			# - Dropping hinting then consists of the following two ops:
-			#   * Drop the piece of the program in each charstring before the
-			#     last call to a stem op or a stem-calling subroutine,
-			#   * Drop all hintmask operations.
-			# - It's trickier... A hintmask right after hints and a few numbers
-			#    will act as an implicit vstemhm. As such, we track whether
-			#    we have seen any non-hint operators so far and do the right
-			#    thing, recursively... Good luck understanding that :(
-			css = set()
-			for g in font.charset:
-				c, _ = cs.getItemAndSelector(g)
-				c.decompile()
-				subrs = getattr(c.private, "Subrs", [])
-				decompiler = _DehintingT2Decompiler(css, subrs, c.globalSubrs,
-								    c.private.nominalWidthX,
-								    c.private.defaultWidthX)
-				decompiler.execute(c)
-				c.width = decompiler.width
-			for charstring in css:
-				charstring.drop_hints()
-			del css
-
-			# Drop font-wide hinting values
-			all_privs = []
-			if hasattr(font, 'FDSelect'):
-				all_privs.extend(fd.Private for fd in font.FDArray)
-			else:
-				all_privs.append(font.Private)
-			for priv in all_privs:
-				for k in ['BlueValues', 'OtherBlues',
-					  'FamilyBlues', 'FamilyOtherBlues',
-					  'BlueScale', 'BlueShift', 'BlueFuzz',
-					  'StemSnapH', 'StemSnapV', 'StdHW', 'StdVW']:
-					if hasattr(priv, k):
-						setattr(priv, k, None)
-
-		# Renumber subroutines to remove unused ones
-
-		# Mark all used subroutines
-		for g in font.charset:
-			c, _ = cs.getItemAndSelector(g)
-			subrs = getattr(c.private, "Subrs", [])
-			decompiler = _MarkingT2Decompiler(subrs, c.globalSubrs)
-			decompiler.execute(c)
-
-		all_subrs = [font.GlobalSubrs]
-		if hasattr(font, 'FDSelect'):
-			all_subrs.extend(fd.Private.Subrs for fd in font.FDArray if hasattr(fd.Private, 'Subrs') and fd.Private.Subrs)
-		elif hasattr(font.Private, 'Subrs') and font.Private.Subrs:
-			all_subrs.append(font.Private.Subrs)
-
-		subrs = set(subrs) # Remove duplicates
-
-		# Prepare
-		for subrs in all_subrs:
-			if not hasattr(subrs, '_used'):
-				subrs._used = set()
-			subrs._used = _uniq_sort(subrs._used)
-			subrs._old_bias = psCharStrings.calcSubrBias(subrs)
-			subrs._new_bias = psCharStrings.calcSubrBias(subrs._used)
-
-		# Renumber glyph charstrings
-		for g in font.charset:
-			c, _ = cs.getItemAndSelector(g)
-			subrs = getattr(c.private, "Subrs", [])
-			c.subset_subroutines (subrs, font.GlobalSubrs)
-
-		# Renumber subroutines themselves
-		for subrs in all_subrs:
-			if subrs == font.GlobalSubrs:
-				if not hasattr(font, 'FDSelect') and hasattr(font.Private, 'Subrs'):
-					local_subrs = font.Private.Subrs
-				else:
-					local_subrs = []
-			else:
-				local_subrs = subrs
-
-			subrs.items = [subrs.items[i] for i in subrs._used]
-			if hasattr(subrs, 'file'):
-				del subrs.file
-			if hasattr(subrs, 'offsets'):
-				del subrs.offsets
-
-			for subr in subrs.items:
-				subr.subset_subroutines (local_subrs, font.GlobalSubrs)
-
-		# Delete local SubrsIndex if empty
-		if hasattr(font, 'FDSelect'):
-			for fd in font.FDArray:
-				_delete_empty_subrs(fd.Private)
-		else:
-			_delete_empty_subrs(font.Private)
-
-		# Cleanup
-		for subrs in all_subrs:
-			del subrs._used, subrs._old_bias, subrs._new_bias
-
-	return True
-
-
-def _delete_empty_subrs(private_dict):
-	if hasattr(private_dict, 'Subrs') and not private_dict.Subrs:
-		if 'Subrs' in private_dict.rawDict:
-			del private_dict.rawDict['Subrs']
-		del private_dict.Subrs
 
 
 @_add_method(ttLib.getTableClass('cmap'))
@@ -2666,6 +2223,11 @@ def prune_pre_subset(self, font, options):
 		nameIDs.update([inst.subfamilyNameID for inst in fvar.instances])
 		nameIDs.update([inst.postscriptNameID for inst in fvar.instances
 				if inst.postscriptNameID != 0xFFFF])
+	stat = font.get('STAT')
+	if stat:
+		if stat.table.AxisValueArray:
+			nameIDs.update([val_rec.ValueNameID for val_rec in stat.table.AxisValueArray.AxisValue])
+		nameIDs.update([axis_rec.AxisNameID for axis_rec in stat.table.DesignAxisRecord.Axis])
 	if '*' not in options.name_IDs:
 		self.names = [n for n in self.names if n.nameID in nameIDs]
 	if not options.name_legacy:
@@ -2693,6 +2255,12 @@ def prune_pre_subset(self, font, options):
 	return True	# Required table
 
 
+@_add_method(ttLib.getTableClass('head'))
+def prune_post_subset(self, font, options):
+	# Force re-compiling head table, to update any recalculated values.
+	return True
+
+
 # TODO(behdad) OS/2 ulCodePageRange?
 # TODO(behdad) Drop AAT tables.
 # TODO(behdad) Drop unneeded GSUB/GPOS Script/LangSys entries.
@@ -2715,13 +2283,12 @@ class Options(object):
 	_drop_tables_default = ['BASE', 'JSTF', 'DSIG', 'EBDT', 'EBLC',
 				'EBSC', 'SVG', 'PCLT', 'LTSH']
 	_drop_tables_default += ['Feat', 'Glat', 'Gloc', 'Silf', 'Sill']  # Graphite
-	_drop_tables_default += ['sbix']  # Color
 	_no_subset_tables_default = ['avar', 'fvar',
 				     'gasp', 'head', 'hhea', 'maxp',
 				     'vhea', 'OS/2', 'loca', 'name', 'cvt',
 				     'fpgm', 'prep', 'VDMX', 'DSIG', 'CPAL',
-				     'MVAR', 'STAT']
-	_hinting_tables_default = ['cvar', 'cvt', 'fpgm', 'prep', 'hdmx', 'VDMX']
+				     'MVAR', 'cvar', 'STAT']
+	_hinting_tables_default = ['cvt', 'cvar', 'fpgm', 'prep', 'hdmx', 'VDMX']
 
 	# Based on HarfBuzz shapers
 	_layout_features_groups = {
@@ -2751,7 +2318,9 @@ class Options(object):
 		self.passthrough_tables = False  # keep/drop tables we can't subset
 		self.hinting_tables = self._hinting_tables_default[:]
 		self.legacy_kern = False # drop 'kern' table if GPOS available
+		self.layout_closure = True
 		self.layout_features = self._layout_features_default[:]
+		self.layout_scripts = ['*']
 		self.ignore_missing_glyphs = False
 		self.ignore_missing_unicodes = True
 		self.hinting = True
@@ -2762,6 +2331,7 @@ class Options(object):
 		self.name_legacy = False
 		self.name_languages = [0x0409] # English
 		self.obfuscate_names = False # to make webfont unusable as a system font
+		self.retain_gids = False
 		self.notdef_glyph = True # gid0 for TrueType / .notdef for CFF
 		self.notdef_outline = False # No need for notdef to have an outline really
 		self.recommended_glyphs = False # gid1, gid2, gid3 for TrueType
@@ -2769,6 +2339,7 @@ class Options(object):
 		self.recalc_timestamp = False # Recalculate font modified timestamp
 		self.prune_unicode_ranges = True # Clear unused 'ulUnicodeRange' bits
 		self.recalc_average_width = False # update 'xAvgCharWidth'
+		self.recalc_max_context = False # update 'usMaxContext'
 		self.canonical_order = None # Order tables as recommended
 		self.flavor = None  # May be 'woff' or 'woff2'
 		self.with_zopfli = False  # use zopfli instead of zlib for WOFF 1.0
@@ -2776,6 +2347,7 @@ class Options(object):
 		self.verbose = False
 		self.timing = False
 		self.xml = False
+		self.font_number = -1
 
 		self.set(**kwargs)
 
@@ -2959,7 +2531,7 @@ class Subsetter(object):
 					self.glyphs.add(font.getGlyphName(i))
 				log.info("Added first four glyphs to subset")
 
-		if 'GSUB' in font:
+		if self.options.layout_closure and 'GSUB' in font:
 			with timer("close glyph list over 'GSUB'"):
 				log.info("Closing glyph list over 'GSUB': %d glyphs before",
 						 len(self.glyphs))
@@ -3019,12 +2591,22 @@ class Subsetter(object):
 				log.glyphs(self.glyphs, font=font)
 		self.glyphs_cffed = frozenset(self.glyphs)
 
-		self.glyphs_all = frozenset(self.glyphs)
+		self.glyphs_retained = frozenset(self.glyphs)
 
 		order = font.getReverseGlyphMap()
-		self.reverseOrigGlyphMap = {g:order[g] for g in self.glyphs_all}
+		self.reverseOrigGlyphMap = {g:order[g] for g in self.glyphs_retained}
 
-		log.info("Retaining %d glyphs", len(self.glyphs_all))
+		self.last_retained_order = max(self.reverseOrigGlyphMap.values())
+		self.last_retained_glyph = font.getGlyphOrder()[self.last_retained_order]
+
+		self.glyphs_emptied = frozenset()
+		if self.options.retain_gids:
+			self.glyphs_emptied = {g for g in realGlyphs - self.glyphs_retained if order[g] <= self.last_retained_order}
+
+		self.reverseEmptiedGlyphMap = {g:order[g] for g in self.glyphs_emptied}
+
+
+		log.info("Retaining %d glyphs", len(self.glyphs_retained))
 
 		del self.glyphs
 
@@ -3037,7 +2619,7 @@ class Subsetter(object):
 			elif hasattr(clazz, 'subset_glyphs'):
 				with timer("subset '%s'" % tag):
 					table = font[tag]
-					self.glyphs = self.glyphs_all
+					self.glyphs = self.glyphs_retained
 					retain = table.subset_glyphs(self)
 					del self.glyphs
 				if not retain:
@@ -3053,9 +2635,14 @@ class Subsetter(object):
 
 		with timer("subset GlyphOrder"):
 			glyphOrder = font.getGlyphOrder()
-			glyphOrder = [g for g in glyphOrder if g in self.glyphs_all]
+			if not self.options.retain_gids:
+				glyphOrder = [g for g in glyphOrder if g in self.glyphs_retained]
+			else:
+				glyphOrder = [g for g in glyphOrder if font.getGlyphID(g) <= self.last_retained_order]
+
 			font.setGlyphOrder(glyphOrder)
 			font._buildReverseGlyphOrderDict()
+
 
 	def _prune_post_subset(self, font):
 		for tag in font.keys():
@@ -3067,10 +2654,15 @@ class Subsetter(object):
 					log.info("%s Unicode ranges pruned: %s", tag, sorted(new_uniranges))
 				if self.options.recalc_average_width:
 					widths = [m[0] for m in font["hmtx"].metrics.values() if m[0] > 0]
-					avg_width = round(sum(widths) / len(widths))
+					avg_width = otRound(sum(widths) / len(widths))
 					if avg_width != font[tag].xAvgCharWidth:
 						font[tag].xAvgCharWidth = avg_width
 						log.info("%s xAvgCharWidth updated: %d", tag, avg_width)
+				if self.options.recalc_max_context:
+					max_context = maxCtxFont(font)
+					if max_context != font[tag].usMaxContext:
+						font[tag].usMaxContext = max_context
+						log.info("%s usMaxContext updated: %d", tag, max_context)
 			clazz = ttLib.getTableClass(tag)
 			if hasattr(clazz, 'prune_post_subset'):
 				with timer("prune '%s'" % tag):
@@ -3108,7 +2700,8 @@ def load_font(fontFile,
 			    checkChecksums=checkChecksums,
 			    recalcBBoxes=options.recalc_bounds,
 			    recalcTimestamp=options.recalc_timestamp,
-			    lazy=lazy)
+			    lazy=lazy,
+			    fontNumber=options.font_number)
 
 	# Hack:
 	#
@@ -3132,8 +2725,6 @@ def load_font(fontFile,
 
 @timer("compile and save font")
 def save_font(font, outfile, options):
-	if options.flavor and not hasattr(font, 'flavor'):
-		raise Exception("fonttools version does not support flavors.")
 	if options.with_zopfli and options.flavor == "woff":
 		from fontTools.ttLib import sfnt
 		sfnt.USE_ZOPFLI = True
@@ -3210,8 +2801,7 @@ def main(args=None):
 	args = args[1:]
 
 	subsetter = Subsetter(options=options)
-	basename, extension = splitext(fontfile)
-	outfile = basename + '.subset' + extension
+	outfile = None
 	glyphs = []
 	gids = []
 	unicodes = []
@@ -3229,7 +2819,8 @@ def main(args=None):
 			text += g[7:]
 			continue
 		if g.startswith('--text-file='):
-			text += open(g[12:], encoding='utf-8').read().replace('\n', '')
+			with open(g[12:], encoding='utf-8') as f:
+				text += f.read().replace('\n', '')
 			continue
 		if g.startswith('--unicodes='):
 			if g[11:] == '*':
@@ -3238,15 +2829,17 @@ def main(args=None):
 				unicodes.extend(parse_unicodes(g[11:]))
 			continue
 		if g.startswith('--unicodes-file='):
-			for line in open(g[16:]).readlines():
-				unicodes.extend(parse_unicodes(line.split('#')[0]))
+			with open(g[16:]) as f:
+				for line in f.readlines():
+					unicodes.extend(parse_unicodes(line.split('#')[0]))
 			continue
 		if g.startswith('--gids='):
 			gids.extend(parse_gids(g[7:]))
 			continue
 		if g.startswith('--gids-file='):
-			for line in open(g[12:]).readlines():
-				gids.extend(parse_gids(line.split('#')[0]))
+			with open(g[12:]) as f:
+				for line in f.readlines():
+					gids.extend(parse_gids(line.split('#')[0]))
 			continue
 		if g.startswith('--glyphs='):
 			if g[9:] == '*':
@@ -3255,13 +2848,22 @@ def main(args=None):
 				glyphs.extend(parse_glyphs(g[9:]))
 			continue
 		if g.startswith('--glyphs-file='):
-			for line in open(g[14:]).readlines():
-				glyphs.extend(parse_glyphs(line.split('#')[0]))
+			with open(g[14:]) as f:
+				for line in f.readlines():
+					glyphs.extend(parse_glyphs(line.split('#')[0]))
 			continue
 		glyphs.append(g)
 
 	dontLoadGlyphNames = not options.glyph_names and not glyphs
 	font = load_font(fontfile, options, dontLoadGlyphNames=dontLoadGlyphNames)
+
+	if outfile is None:
+		basename, _ = splitext(fontfile)
+		if options.flavor is not None:
+			ext = "." + options.flavor.lower()
+		else:
+			ext = ".ttf" if font.sfntVersion == "\0\1\0\0" else ".otf"
+		outfile = basename + ".subset" + ext
 
 	with timer("compile glyph list"):
 		if wildcard_glyphs:

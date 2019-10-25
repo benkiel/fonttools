@@ -5,7 +5,6 @@
 """Font merger.
 """
 
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 from fontTools.misc.timeTools import timestampNow
 from fontTools import ttLib, cffLib
@@ -226,6 +225,23 @@ ttLib.getTableClass('hhea').mergeMap = {
 	'numberOfHMetrics': recalculate,
 }
 
+ttLib.getTableClass('vhea').mergeMap = {
+	'*': equal,
+	'tableTag': equal,
+	'tableVersion': max,
+	'ascent': max,
+	'descent': min,
+	'lineGap': max,
+	'advanceHeightMax': max,
+	'minTopSideBearing': min,
+	'minBottomSideBearing': min,
+	'yMaxExtent': max,
+	'caretSlopeRise': first,
+	'caretSlopeRun': first,
+	'caretOffset': first,
+	'numberOfVMetrics': recalculate,
+}
+
 os2FsTypeMergeBitMap = {
 	'size': 16,
 	'*': lambda bit: 0,
@@ -363,10 +379,18 @@ def _glyphsAreSame(glyphSet1, glyphSet2, glyph1, glyph2):
 		g1.width == g2.width and
 		(not hasattr(g1, 'height') or g1.height == g2.height))
 
+# Valid (format, platformID, platEncID) triplets for cmap subtables containing
+# Unicode BMP-only and Unicode Full Repertoire semantics.
+# Cf. OpenType spec for "Platform specific encodings":
+# https://docs.microsoft.com/en-us/typography/opentype/spec/name
+class CmapUnicodePlatEncodings:
+	BMP = {(4, 3, 1), (4, 0, 3), (4, 0, 4), (4, 0, 6)}
+	FullRepertoire = {(12, 3, 10), (12, 0, 4), (12, 0, 6)}
+
 @_add_method(ttLib.getTableClass('cmap'))
 def merge(self, m, tables):
 	# TODO Handle format=14.
-	# Only merges 4/3/1 and 12/3/10 subtables, ignores all other subtables
+	# Only merge format 4 and 12 Unicode subtables, ignores all other subtables
 	# If there is a format 12 table for the same font, ignore the format 4 table
 	cmapTables = []
 	for fontIdx,table in enumerate(tables):
@@ -374,10 +398,16 @@ def merge(self, m, tables):
 		format12 = None
 		for subtable in table.tables:
 			properties = (subtable.format, subtable.platformID, subtable.platEncID)
-			if properties == (4,3,1):
+			if properties in CmapUnicodePlatEncodings.BMP:
 				format4 = subtable
-			elif properties == (12,3,10):
+			elif properties in CmapUnicodePlatEncodings.FullRepertoire:
 				format12 = subtable
+			else:
+				log.warning(
+					"Dropped cmap subtable from font [%s]:\t"
+					"format %2s, platformID %2s, platEncID %2s",
+					fontIdx, subtable.format, subtable.platformID, subtable.platEncID
+				)
 		if format12 is not None:
 			cmapTables.append((format12, fontIdx))
 		elif format4 is not None:
@@ -498,7 +528,11 @@ def mergeScripts(lst):
 	self = otTables.Script()
 	self.LangSysRecord = lsrecords
 	self.LangSysCount = len(lsrecords)
-	self.DefaultLangSys = mergeLangSyses([s.DefaultLangSys for s in lst if s.DefaultLangSys])
+	dfltLangSyses = [s.DefaultLangSys for s in lst if s.DefaultLangSys]
+	if dfltLangSyses:
+		self.DefaultLangSys = mergeLangSyses(dfltLangSyses)
+	else:
+		self.DefaultLangSys = None
 	return self
 
 def mergeScriptRecords(lst):
@@ -978,16 +1012,18 @@ class Merger(object):
 	def _mergeGlyphOrders(self, glyphOrders):
 		"""Modifies passed-in glyphOrders to reflect new glyph names.
 		Returns glyphOrder for the merged font."""
-		# Simply append font index to the glyph name for now.
-		# TODO Even this simplistic numbering can result in conflicts.
-		# But then again, we have to improve this soon anyway.
-		mega = []
-		for n,glyphOrder in enumerate(glyphOrders):
+		mega = {}
+		for glyphOrder in glyphOrders:
 			for i,glyphName in enumerate(glyphOrder):
-				glyphName += "#" + repr(n)
-				glyphOrder[i] = glyphName
-				mega.append(glyphName)
-		return mega
+				if glyphName in mega:
+					n = mega[glyphName]
+					while (glyphName + "#" + repr(n)) in mega:
+						n += 1
+					mega[glyphName] = n
+					glyphName += "#" + repr(n)
+					glyphOrder[i] = glyphName
+				mega[glyphName] = 1
+		return list(mega.keys())
 
 	def mergeObjects(self, returnTable, logic, tables):
 		# Right now we don't use self at all.  Will use in the future

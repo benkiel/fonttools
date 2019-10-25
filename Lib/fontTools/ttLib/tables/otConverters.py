@@ -1,15 +1,19 @@
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 from fontTools.misc.fixedTools import (
-	fixedToFloat as fi2fl, floatToFixed as fl2fi, ensureVersionIsLong as fi2ve,
-	versionToFixed as ve2fi)
+	fixedToFloat as fi2fl,
+	floatToFixed as fl2fi,
+	floatToFixedToStr as fl2str,
+	strToFixedToFloat as str2fl,
+	ensureVersionIsLong as fi2ve,
+	versionToFixed as ve2fi,
+)
 from fontTools.misc.textTools import pad, safeEval
 from fontTools.ttLib import getSearchRange
 from .otBase import (CountReference, FormatSwitchingBaseTable,
                      OTTableReader, OTTableWriter, ValueRecordFactory)
 from .otTables import (lookupTypes, AATStateTable, AATState, AATAction,
                        ContextualMorphAction, LigatureMorphAction,
-                       MorxSubtable)
+                       InsertionMorphAction, MorxSubtable)
 from functools import partial
 import struct
 import logging
@@ -130,7 +134,7 @@ class BaseConverter(object):
 		self.tableClass = tableClass
 		self.isCount = name.endswith("Count") or name in ['DesignAxisRecordSize', 'ValueRecordSize']
 		self.isLookupType = name.endswith("LookupType") or name == "MorphType"
-		self.isPropagated = name in ["ClassCount", "Class2Count", "FeatureTag", "SettingsCount", "VarRegionCount", "MappingCount", "RegionAxisCount", 'DesignAxisCount', 'DesignAxisRecordSize', 'AxisValueCount', 'ValueRecordSize']
+		self.isPropagated = name in ["ClassCount", "Class2Count", "FeatureTag", "SettingsCount", "VarRegionCount", "MappingCount", "RegionAxisCount", 'DesignAxisCount', 'DesignAxisRecordSize', 'AxisValueCount', 'ValueRecordSize', 'AxisCount']
 
 	def readArray(self, reader, font, tableDict, count):
 		"""Read an array of values from the reader."""
@@ -316,6 +320,11 @@ class Fixed(FloatValue):
 		return  fi2fl(reader.readLong(), 16)
 	def write(self, writer, font, tableDict, value, repeatIndex=None):
 		writer.writeLong(fl2fi(value, 16))
+	def xmlRead(self, attrs, content, font):
+		return str2fl(attrs["value"], 16)
+	def xmlWrite(self, xmlWriter, font, value, name, attrs):
+		xmlWriter.simpletag(name, attrs + [("value", fl2str(value, 16))])
+		xmlWriter.newline()
 
 class F2Dot14(FloatValue):
 	staticSize = 2
@@ -323,6 +332,11 @@ class F2Dot14(FloatValue):
 		return  fi2fl(reader.readShort(), 14)
 	def write(self, writer, font, tableDict, value, repeatIndex=None):
 		writer.writeShort(fl2fi(value, 14))
+	def xmlRead(self, attrs, content, font):
+		return str2fl(attrs["value"], 14)
+	def xmlWrite(self, xmlWriter, font, value, name, attrs):
+		xmlWriter.simpletag(name, attrs + [("value", fl2str(value, 14))])
+		xmlWriter.newline()
 
 class Version(BaseConverter):
 	staticSize = 4
@@ -1055,6 +1069,9 @@ class STXHeader(BaseConverter):
 			table.LigComponents = \
 				ligComponentReader.readUShortArray(numLigComponents)
 			table.Ligatures = self._readLigatures(ligaturesReader, font)
+		elif issubclass(self.tableClass, InsertionMorphAction):
+			actionReader = reader.getSubReader(0)
+			actionReader.seek(pos + reader.readULong())
 		table.GlyphClasses = self.classLookup.read(classTableReader,
 		                                           font, tableDict)
 		numStates = int((entryTableReader.pos - stateArrayReader.pos)
@@ -1119,19 +1136,15 @@ class STXHeader(BaseConverter):
 		glyphClassWriter = OTTableWriter()
 		self.classLookup.write(glyphClassWriter, font, tableDict,
 		                       value.GlyphClasses, repeatIndex=None)
-		glyphClassData = pad(glyphClassWriter.getAllData(), 4)
+		glyphClassData = pad(glyphClassWriter.getAllData(), 2)
 		glyphClassCount = max(value.GlyphClasses.values()) + 1
 		glyphClassTableOffset = 16  # size of STXHeader
 		if self.perGlyphLookup is not None:
 			glyphClassTableOffset += 4
 
-		actionData, actionIndex = None, None
-		if issubclass(self.tableClass, LigatureMorphAction):
-			glyphClassTableOffset += 12
-			actionData, actionIndex = \
-				self._compileLigActions(value, font)
-			actionData = pad(actionData, 4)
-
+		glyphClassTableOffset += self.tableClass.actionHeaderSize
+		actionData, actionIndex = \
+			self.tableClass.compileActions(font, value.States)
 		stateArrayData, entryTableData = self._compileStates(
 			font, value.States, glyphClassCount, actionIndex)
 		stateArrayOffset = glyphClassTableOffset + len(glyphClassData)
@@ -1139,17 +1152,19 @@ class STXHeader(BaseConverter):
 		perGlyphOffset = entryTableOffset + len(entryTableData)
 		perGlyphData = \
 			pad(self._compilePerGlyphLookups(value, font), 4)
+		if actionData is not None:
+			actionOffset = entryTableOffset + len(entryTableData)
+		else:
+			actionOffset = None
+
+		ligaturesOffset, ligComponentsOffset = None, None
 		ligComponentsData = self._compileLigComponents(value, font)
 		ligaturesData = self._compileLigatures(value, font)
-		if actionData is None:
-			actionOffset = None
-			ligComponentsOffset = None
-			ligaturesOffset = None
-		else:
+		if ligComponentsData is not None:
 			assert len(perGlyphData) == 0
-			actionOffset = entryTableOffset + len(entryTableData)
 			ligComponentsOffset = actionOffset + len(actionData)
 			ligaturesOffset = ligComponentsOffset + len(ligComponentsData)
+
 		writer.writeULong(glyphClassCount)
 		writer.writeULong(glyphClassTableOffset)
 		writer.writeULong(stateArrayOffset)
@@ -1158,6 +1173,7 @@ class STXHeader(BaseConverter):
 			writer.writeULong(perGlyphOffset)
 		if actionOffset is not None:
 			writer.writeULong(actionOffset)
+		if ligComponentsOffset is not None:
 			writer.writeULong(ligComponentsOffset)
 			writer.writeULong(ligaturesOffset)
 		writer.writeData(glyphClassData)
@@ -1213,34 +1229,6 @@ class STXHeader(BaseConverter):
 			                          {}, lookup, None)
 			writer.writeSubTable(lookupWriter)
 		return writer.getAllData()
-
-	def _compileLigActions(self, table, font):
-		assert issubclass(self.tableClass, LigatureMorphAction)
-		actions = set()
-		for state in table.States:
-			for _glyphClass, trans in state.Transitions.items():
-				actions.add(trans.compileLigActions())
-		result, actionIndex = b"", {}
-		# Sort the compiled actions in decreasing order of
-		# length, so that the longer sequence come before the
-		# shorter ones.  For each compiled action ABCD, its
-		# suffixes BCD, CD, and D do not be encoded separately
-		# (in case they occur); instead, we can just store an
-		# index that points into the middle of the longer
-		# sequence. Every compiled AAT ligature sequence is
-		# terminated with an end-of-sequence flag, which can
-		# only be set on the last element of the sequence.
-		# Therefore, it is sufficient to consider just the
-		# suffixes.
-		for a in sorted(actions, key=lambda x:(-len(x), x)):
-			if a not in actionIndex:
-				for i in range(0, len(a), 4):
-					suffix = a[i:]
-					suffixIndex = (len(result) + i) // 4
-					actionIndex.setdefault(
-						suffix, suffixIndex)
-				result += a
-		return (result, actionIndex)
 
 	def _compileLigComponents(self, table, font):
 		if not hasattr(table, "LigComponents"):

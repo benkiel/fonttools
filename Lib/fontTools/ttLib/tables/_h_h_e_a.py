@@ -1,4 +1,3 @@
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 from fontTools.misc import sstruct
 from fontTools.misc.textTools import safeEval
@@ -35,6 +34,19 @@ class table__h_h_e_a(DefaultTable.DefaultTable):
 	# Note: Keep in sync with table__v_h_e_a
 
 	dependencies = ['hmtx', 'glyf', 'CFF ']
+
+	# OpenType spec renamed these, add aliases for compatibility
+	@property
+	def ascender(self): return self.ascent
+
+	@ascender.setter
+	def ascender(self,value): self.ascent = value
+
+	@property
+	def descender(self): return self.descent
+
+	@descender.setter
+	def descender(self,value): self.descent = value
 
 	def decompile(self, data, ttFont):
 		sstruct.unpack(hheaFormat, data, self)

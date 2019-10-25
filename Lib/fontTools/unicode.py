@@ -1,4 +1,3 @@
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 
 def _makeunicodes(f):
@@ -18,8 +17,11 @@ class _UnicodeCustom(object):
 
 	def __init__(self, f):
 		if isinstance(f, basestring):
-			f = open(f)
-		self.codes = _makeunicodes(f)
+			with open(f) as fd:
+				codes = _makeunicodes(fd)
+		else:
+			codes = _makeunicodes(f)
+		self.codes = codes
 
 	def __getitem__(self, charCode):
 		try:

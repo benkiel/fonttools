@@ -1,5 +1,3 @@
-from __future__ import print_function, division, absolute_import
-from __future__ import unicode_literals
 from fontTools.misc.py23 import *
 from fontTools.misc.loggingTools import CapturingLogHandler
 from fontTools.feaLib.builder import Builder, addOpenTypeFeatures, \
@@ -65,11 +63,13 @@ class BuilderTest(unittest.TestCase):
         spec9a spec9b spec9c1 spec9c2 spec9c3 spec9d spec9e spec9f spec9g
         spec10
         bug453 bug457 bug463 bug501 bug502 bug504 bug505 bug506 bug509
-        bug512 bug514 bug568 bug633
+        bug512 bug514 bug568 bug633 bug1307 bug1459
         name size size2 multiple_feature_blocks omitted_GlyphClassDef
         ZeroValue_SinglePos_horizontal ZeroValue_SinglePos_vertical
         ZeroValue_PairPos_horizontal ZeroValue_PairPos_vertical
         ZeroValue_ChainSinglePos_horizontal ZeroValue_ChainSinglePos_vertical
+        PairPosSubtable ChainSubstSubtable ChainPosSubtable LigatureSubtable
+        AlternateSubtable MultipleSubstSubtable SingleSubstSubtable
     """.split()
 
     def __init__(self, methodName):
@@ -201,7 +201,7 @@ class BuilderTest(unittest.TestCase):
     def test_pairPos_redefinition_warning(self):
         # https://github.com/fonttools/fonttools/issues/1147
         logger = logging.getLogger("fontTools.feaLib.builder")
-        with CapturingLogHandler(logger, "WARNING") as captor:
+        with CapturingLogHandler(logger, "DEBUG") as captor:
             # the pair "yacute semicolon" is redefined in the enum pos
             font = self.build(
                 "@Y_LC = [y yacute ydieresis];"
@@ -284,6 +284,17 @@ class BuilderTest(unittest.TestCase):
             "it must be the first of the languagesystem statements",
             self.build, "languagesystem latn TRK; languagesystem DFLT dflt;")
 
+    def test_languagesystem_DFLT_not_preceding(self):
+        self.assertRaisesRegex(
+            FeatureLibError,
+            "languagesystems using the \"DFLT\" script tag must "
+            "precede all other languagesystems",
+            self.build,
+            "languagesystem DFLT dflt; "
+            "languagesystem latn dflt; "
+            "languagesystem DFLT fooo; "
+        )
+
     def test_script(self):
         builder = Builder(makeTTFont(), (None, None))
         builder.start_feature(location=None, name='test')
@@ -315,11 +326,7 @@ class BuilderTest(unittest.TestCase):
         self.assertEqual(builder.language_systems,
                          {('cyrl', 'BGR ')})
         builder.start_feature(location=None, name='test2')
-        self.assertRaisesRegex(
-            FeatureLibError,
-            "Need non-DFLT script when using non-dflt language "
-            "\(was: \"FRA \"\)",
-            builder.set_language, None, 'FRA ', True, False)
+        self.assertEqual(builder.language_systems, {('latn', 'FRA ')})
 
     def test_language_in_aalt_feature(self):
         self.assertRaisesRegex(
@@ -503,6 +510,34 @@ class BuilderTest(unittest.TestCase):
         font = makeTTFont()
         addOpenTypeFeatures(font, tree)
         assert "GSUB" in font
+
+    def test_unsupported_subtable_break(self):
+        logger = logging.getLogger("fontTools.feaLib.builder")
+        with CapturingLogHandler(logger, level='WARNING') as captor:
+            self.build(
+                "feature test {"
+                "    pos a 10;"
+                "    subtable;"
+                "    pos b 10;"
+                "} test;"
+            )
+
+        captor.assertRegex(
+            '<features>:1:32: unsupported "subtable" statement for lookup type'
+        )
+
+    def test_skip_featureNames_if_no_name_table(self):
+        features = (
+            "feature ss01 {"
+            "    featureNames {"
+            '        name "ignored as we request to skip name table";'
+            "    };"
+            "    sub A by A.alt1;"
+            "} ss01;"
+        )
+        font = self.build(features, tables=["GSUB"])
+        self.assertIn("GSUB", font)
+        self.assertNotIn("name", font)
 
 
 def generate_feature_file_test(name):

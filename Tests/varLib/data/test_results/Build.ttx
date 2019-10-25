@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ttFont sfntVersion="\x00\x01\x00\x00" ttLibVersion="3.17">
 
+  <GDEF>
+    <Version value="0x00010003"/>
+    <GlyphClassDef Format="2">
+      <ClassDef glyph="uni0024" class="1"/>
+      <ClassDef glyph="uni0024.nostroke" class="1"/>
+      <ClassDef glyph="uni0041" class="1"/>
+      <ClassDef glyph="uni0061" class="1"/>
+    </GlyphClassDef>
+  </GDEF>
+
   <HVAR>
     <Version value="0x00010000"/>
     <VarStore Format="1">
@@ -281,7 +291,7 @@
         <delta pt="15" x="0" y="0"/>
         <delta pt="16" x="0" y="0"/>
         <delta pt="17" x="0" y="0"/>
-        <delta pt="18" x="0" y="7"/>
+        <delta pt="18" x="0" y="0"/>
         <delta pt="19" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -304,7 +314,7 @@
         <delta pt="15" x="0" y="0"/>
         <delta pt="16" x="0" y="0"/>
         <delta pt="17" x="0" y="0"/>
-        <delta pt="18" x="0" y="-18"/>
+        <delta pt="18" x="0" y="0"/>
         <delta pt="19" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -424,7 +434,7 @@
         <delta pt="23" x="-2" y="0"/>
         <delta pt="24" x="0" y="0"/>
         <delta pt="25" x="-10" y="0"/>
-        <delta pt="26" x="0" y="9"/>
+        <delta pt="26" x="0" y="0"/>
         <delta pt="27" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -455,7 +465,7 @@
         <delta pt="23" x="12" y="0"/>
         <delta pt="24" x="0" y="0"/>
         <delta pt="25" x="17" y="0"/>
-        <delta pt="26" x="0" y="-23"/>
+        <delta pt="26" x="0" y="0"/>
         <delta pt="27" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -620,7 +630,7 @@
         <delta pt="60" x="33" y="-1"/>
         <delta pt="61" x="0" y="0"/>
         <delta pt="62" x="-3" y="0"/>
-        <delta pt="63" x="0" y="-4"/>
+        <delta pt="63" x="0" y="0"/>
         <delta pt="64" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -688,8 +698,8 @@
         <delta pt="60" x="-25" y="-13"/>
         <delta pt="61" x="0" y="0"/>
         <delta pt="62" x="32" y="0"/>
-        <delta pt="63" x="0" y="16"/>
-        <delta pt="64" x="0" y="3"/>
+        <delta pt="63" x="0" y="0"/>
+        <delta pt="64" x="0" y="0"/>
       </tuple>
       <tuple>
         <coord axis="cntr" value="1.0"/>
@@ -965,7 +975,7 @@
         <delta pt="61" x="-15" y="0"/>
         <delta pt="62" x="0" y="0"/>
         <delta pt="63" x="-7" y="0"/>
-        <delta pt="64" x="0" y="12"/>
+        <delta pt="64" x="0" y="0"/>
         <delta pt="65" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -1034,7 +1044,7 @@
         <delta pt="61" x="39" y="0"/>
         <delta pt="62" x="0" y="0"/>
         <delta pt="63" x="63" y="0"/>
-        <delta pt="64" x="0" y="-19"/>
+        <delta pt="64" x="0" y="0"/>
         <delta pt="65" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -1314,7 +1324,7 @@
         <delta pt="61" x="-15" y="0"/>
         <delta pt="62" x="0" y="0"/>
         <delta pt="63" x="-7" y="0"/>
-        <delta pt="64" x="0" y="12"/>
+        <delta pt="64" x="0" y="0"/>
         <delta pt="65" x="0" y="0"/>
       </tuple>
       <tuple>
@@ -1383,7 +1393,7 @@
         <delta pt="61" x="49" y="0"/>
         <delta pt="62" x="0" y="0"/>
         <delta pt="63" x="63" y="0"/>
-        <delta pt="64" x="0" y="-19"/>
+        <delta pt="64" x="0" y="0"/>
         <delta pt="65" x="0" y="0"/>
       </tuple>
       <tuple>

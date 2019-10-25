@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-from __future__ import print_function, division, absolute_import, unicode_literals
 from fontTools.misc.py23 import *
 from fontTools.misc import sstruct
 from fontTools.misc.loggingTools import CapturingLogHandler
@@ -54,6 +53,26 @@ class NameTableTest(unittest.TestCase):
 		with self.assertRaises(TypeError):
 			table.setName(1.000, 5, 1, 0, 0)
 
+	def test_names_sort_bytes_str(self):
+		# Corner case: If a user appends a name record directly to `names`, the
+		# `__lt__` method on NameRecord may run into duplicate name records where
+		# one `string` is a str and the other one bytes, leading to an exception.
+		table = table__n_a_m_e()
+		table.names = [
+			makeName("Test", 25, 3, 1, 0x409),
+			makeName("Test".encode("utf-16be"), 25, 3, 1, 0x409),
+		]
+		table.compile(None)
+
+	def test_names_sort_bytes_str_encoding_error(self):
+		table = table__n_a_m_e()
+		table.names = [
+			makeName("Test寬", 25, 1, 0, 0),
+			makeName("Test鬆鬆", 25, 1, 0, 0),
+		]
+		with self.assertRaises(TypeError):
+			table.names.sort()
+
 	def test_addName(self):
 		table = table__n_a_m_e()
 		nameIDs = []
@@ -76,6 +95,55 @@ class NameTableTest(unittest.TestCase):
 		with self.assertRaises(TypeError):
 			table.addName(b"abc")  # must be unicode string
 
+	def test_removeNames(self):
+		table = table__n_a_m_e()
+		table.setName("Regular", 2, 1, 0, 0)
+		table.setName("Regular", 2, 3, 1, 0x409)
+		table.removeNames(nameID=2)
+		self.assertEqual(table.names, [])
+
+		table = table__n_a_m_e()
+		table.setName("FamilyName", 1, 1, 0, 0)
+		table.setName("Regular", 2, 1, 0, 0)
+		table.setName("FamilyName", 1, 3, 1, 0x409)
+		table.setName("Regular", 2, 3, 1, 0x409)
+		table.removeNames(platformID=1)
+		self.assertEqual(len(table.names), 2)
+		self.assertIsNone(table.getName(1, 1, 0, 0))
+		self.assertIsNone(table.getName(2, 1, 0, 0))
+		rec1 = table.getName(1, 3, 1, 0x409)
+		self.assertEqual(str(rec1), "FamilyName")
+		rec2 = table.getName(2, 3, 1, 0x409)
+		self.assertEqual(str(rec2), "Regular")
+
+		table = table__n_a_m_e()
+		table.setName("FamilyName", 1, 1, 0, 0)
+		table.setName("Regular", 2, 1, 0, 0)
+		table.removeNames(nameID=1)
+		self.assertEqual(len(table.names), 1)
+		self.assertIsNone(table.getName(1, 1, 0, 0))
+		rec = table.getName(2, 1, 0, 0)
+		self.assertEqual(str(rec), "Regular")
+
+		table = table__n_a_m_e()
+		table.setName("FamilyName", 1, 1, 0, 0)
+		table.setName("Regular", 2, 1, 0, 0)
+		table.removeNames(2, 1, 0, 0)
+		self.assertEqual(len(table.names), 1)
+		self.assertIsNone(table.getName(2, 1, 0, 0))
+		rec = table.getName(1, 1, 0, 0)
+		self.assertEqual(str(rec), "FamilyName")
+
+		table = table__n_a_m_e()
+		table.setName("FamilyName", 1, 1, 0, 0)
+		table.setName("Regular", 2, 1, 0, 0)
+		table.removeNames()
+		self.assertEqual(len(table.names), 2)
+		rec1 = table.getName(1, 1, 0, 0)
+		self.assertEqual(str(rec1), "FamilyName")
+		rec2 = table.getName(2, 1, 0, 0)
+		self.assertEqual(str(rec2), "Regular")
+
 	def test_addMultilingualName(self):
 		# Microsoft Windows has language codes for “English” (en)
 		# and for “Standard German as used in Switzerland” (de-CH).
@@ -93,12 +161,12 @@ class NameTableTest(unittest.TestCase):
 				"en": "Width",
 				"de-CH": "Breite",
 				"gsw-LI": "Bräiti",
-			}, ttFont=font)
+			}, ttFont=font, mac=False)
 			self.assertEqual(widthID, 256)
 			xHeightID = nameTable.addMultilingualName({
 				"en": "X-Height",
 				"gsw-LI": "X-Hööchi"
-			}, ttFont=font)
+			}, ttFont=font, mac=False)
 			self.assertEqual(xHeightID, 257)
 		captor.assertRegex("cannot add Windows name in language gsw-LI")
 		self.assertEqual(names(nameTable), [
@@ -171,7 +239,7 @@ class NameTableTest(unittest.TestCase):
 		captor.assertRegex("cannot store language la into 'ltag' table")
 
 	def test_decompile_badOffset(self):
-                # https://github.com/behdad/fonttools/issues/525
+                # https://github.com/fonttools/fonttools/issues/525
 		table = table__n_a_m_e()
 		badRecord = {
 			"platformID": 1,

@@ -1,7 +1,7 @@
-from __future__ import print_function, division, absolute_import
 from fontTools.misc import xmlWriter
 from fontTools.misc.py23 import *
 from fontTools.misc.loggingTools import deprecateArgument
+from fontTools.ttLib import TTLibError
 from fontTools.ttLib.sfnt import SFNTReader, SFNTWriter
 import os
 import logging
@@ -493,7 +493,10 @@ class TTFont(object):
 		# glyphs (eg. ligatures or alternates) may not be reachable via cmap,
 		# this naming table will usually not cover all glyphs in the font.
 		# If the font has no Unicode cmap table, reversecmap will be empty.
-		reversecmap = self['cmap'].buildReversed()
+		if 'cmap' in self:
+			reversecmap = self['cmap'].buildReversed()
+		else:
+			reversecmap = {}
 		useCount = {}
 		for i in range(numGlyphs):
 			tempName = glyphOrder[i]
@@ -507,14 +510,15 @@ class TTFont(object):
 					glyphName = "%s.alt%d" % (glyphName, numUses - 1)
 				glyphOrder[i] = glyphName
 
-		# Delete the temporary cmap table from the cache, so it can
-		# be parsed again with the right names.
-		del self.tables['cmap']
-		self.glyphOrder = glyphOrder
-		if cmapLoading:
-			# restore partially loaded cmap, so it can continue loading
-			# using the proper names.
-			self.tables['cmap'] = cmapLoading
+		if 'cmap' in self:
+			# Delete the temporary cmap table from the cache, so it can
+			# be parsed again with the right names.
+			del self.tables['cmap']
+			self.glyphOrder = glyphOrder
+			if cmapLoading:
+				# restore partially loaded cmap, so it can continue loading
+				# using the proper names.
+				self.tables['cmap'] = cmapLoading
 
 	@staticmethod
 	def _makeGlyphName(codepoint):
@@ -715,6 +719,9 @@ class _TTGlyphSet(object):
 		return self._glyphType(
 			self, self._glyphs[glyphName], horizontalMetrics, verticalMetrics)
 
+	def __len__(self):
+		return len(self._glyphs)
+
 	def get(self, glyphName, default=None):
 		try:
 			return self[glyphName]
@@ -724,9 +731,9 @@ class _TTGlyphSet(object):
 class _TTGlyph(object):
 
 	"""Wrapper for a TrueType glyph that supports the Pen protocol, meaning
-	that it has a .draw() method that takes a pen object as its only
-	argument. Additionally there are 'width' and 'lsb' attributes, read from
-	the 'hmtx' table.
+	that it has .draw() and .drawPoints() methods that take a pen object as
+	their only argument. Additionally there are 'width' and 'lsb' attributes,
+	read from the 'hmtx' table.
 
 	If the font contains a 'vmtx' table, there will also be 'height' and 'tsb'
 	attributes.
@@ -747,6 +754,10 @@ class _TTGlyph(object):
 		"""
 		self._glyph.draw(pen)
 
+	def drawPoints(self, pen):
+		# drawPoints is only implemented for _TTGlyphGlyf at this time.
+		raise NotImplementedError()
+
 class _TTGlyphCFF(_TTGlyph):
 	pass
 
@@ -760,6 +771,15 @@ class _TTGlyphGlyf(_TTGlyph):
 		glyph = self._glyph
 		offset = self.lsb - glyph.xMin if hasattr(glyph, "xMin") else 0
 		glyph.draw(pen, glyfTable, offset)
+
+	def drawPoints(self, pen):
+		"""Draw the glyph onto PointPen. See fontTools.pens.pointPen
+		for details how that works.
+		"""
+		glyfTable = self._glyphset._glyphs
+		glyph = self._glyph
+		offset = self.lsb - glyph.xMin if hasattr(glyph, "xMin") else 0
+		glyph.drawPoints(pen, glyfTable, offset)
 
 
 class GlyphOrder(object):

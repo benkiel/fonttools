@@ -12,7 +12,6 @@ classes, since whenever to number of tables changes or whenever
 a table's length chages you need to rewrite the whole file anyway.
 """
 
-from __future__ import print_function, division, absolute_import
 from fontTools.misc.py23 import *
 from fontTools.misc import sstruct
 from fontTools.ttLib import TTLibError
@@ -122,6 +121,30 @@ class SFNTReader(object):
 
 	def close(self):
 		self.file.close()
+
+	def __deepcopy__(self, memo):
+		"""Overrides the default deepcopy of SFNTReader object, to make it work
+		in the case when TTFont is loaded with lazy=True, and thus reader holds a
+		reference to a file object which is not pickleable.
+		We work around it by manually copying the data into a in-memory stream.
+		"""
+		from copy import deepcopy
+
+		cls = self.__class__
+		obj = cls.__new__(cls)
+		for k, v in self.__dict__.items():
+			if k == "file":
+				pos = v.tell()
+				v.seek(0)
+				buf = BytesIO(v.read())
+				v.seek(pos)
+				buf.seek(pos)
+				if hasattr(v, "name"):
+					buf.name = v.name
+				obj.file = buf
+			else:
+				obj.__dict__[k] = deepcopy(v, memo)
+		return obj
 
 
 # default compression level for WOFF 1.0 tables and metadata

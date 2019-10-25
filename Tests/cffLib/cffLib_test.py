@@ -1,7 +1,8 @@
-from __future__ import print_function, division, absolute_import
 from fontTools.cffLib import TopDict, PrivateDict, CharStrings
 from fontTools.misc.testTools import parseXML, DataFilesHandler
 from fontTools.ttLib import TTFont
+import copy
+import os
 import sys
 import unittest
 
@@ -45,19 +46,66 @@ class CffLibTest(DataFilesHandler):
         self.assertEqual(topDict.FontBBox, [0, 0, 0, 0])
 
     def test_topDict_set_Encoding(self):
-        file_name = 'TestOTF.otf'
-        font_path = self.getpath(file_name)
-        temp_path = self.temp_font(font_path, file_name)
-        save_path = temp_path[:-4] + '2.otf'
-        font = TTFont(temp_path)
+        ttx_path = self.getpath('TestOTF.ttx')
+        font = TTFont(recalcBBoxes=False, recalcTimestamp=False)
+        font.importXML(ttx_path)
+
         topDict = font["CFF "].cff.topDictIndex[0]
         encoding = [".notdef"] * 256
         encoding[0x20] = "space"
         topDict.Encoding = encoding
+        
+        self.temp_dir()
+        save_path = os.path.join(self.tempdir, 'TestOTF.otf')
         font.save(save_path)
+
         font2 = TTFont(save_path)
         topDict2 = font2["CFF "].cff.topDictIndex[0]
         self.assertEqual(topDict2.Encoding[32], "space")
+
+    def test_CFF_deepcopy(self):
+        """Test that deepcopying a TTFont with a CFF table does not recurse
+        infinitely."""
+        ttx_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "varLib",
+            "data",
+            "master_ttx_interpolatable_otf",
+            "TestFamily2-Master0.ttx",
+        )
+        font = TTFont(recalcBBoxes=False, recalcTimestamp=False)
+        font.importXML(ttx_path)
+        copy.deepcopy(font)
+
+    def test_FDSelect_format_4(self):
+        ttx_path = self.getpath('TestFDSelect4.ttx')
+        font = TTFont(recalcBBoxes=False, recalcTimestamp=False)
+        font.importXML(ttx_path)
+
+        self.temp_dir()
+        save_path = os.path.join(self.tempdir, 'TestOTF.otf')
+        font.save(save_path)
+
+        font2 = TTFont(save_path)
+        topDict2 = font2["CFF2"].cff.topDictIndex[0]
+        self.assertEqual(topDict2.FDSelect.format, 4)
+        self.assertEqual(topDict2.FDSelect.gidArray, [0, 0, 1])
+
+    def test_unique_glyph_names(self):
+        font_path = self.getpath('LinLibertine_RBI.otf')
+        font = TTFont(font_path, recalcBBoxes=False, recalcTimestamp=False)
+
+        glyphOrder = font.getGlyphOrder()
+        self.assertEqual(len(glyphOrder), len(set(glyphOrder)))
+
+        self.temp_dir()
+        save_path = os.path.join(self.tempdir, 'TestOTF.otf')
+        font.save(save_path)
+
+        font2 = TTFont(save_path)
+        glyphOrder = font2.getGlyphOrder()
+        self.assertEqual(len(glyphOrder), len(set(glyphOrder)))
 
 
 if __name__ == "__main__":
